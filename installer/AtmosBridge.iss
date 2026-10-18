@@ -5,8 +5,6 @@
   #define MyAppVersion "0.0.0"
 #endif
 #define Exe "AtmosBridge.exe"
-#define LogArg "--log ""{localappdata}\AtmosBridge\log.txt"""
-#define ConfScript "-NoProfile -ExecutionPolicy Bypass -File ""{app}\mpvconf.ps1"""
 
 [Setup]
 AppId={{25C5F212-A339-413A-8EFD-76FEDCEBFAA9}
@@ -56,19 +54,19 @@ Source: "mpvconf.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{userstartup}\AtmosBridge"; Filename: "{app}\{#Exe}"; Parameters: "{#LogArg}"; Tasks: autostart
-Name: "{userprograms}\AtmosBridge\AtmosBridge"; Filename: "{app}\{#Exe}"; Parameters: "{#LogArg}"
+Name: "{userstartup}\AtmosBridge"; Filename: "{app}\{#Exe}"; Parameters: "--log ""{localappdata}\AtmosBridge\log.txt"""; Tasks: autostart
+Name: "{userprograms}\AtmosBridge\AtmosBridge"; Filename: "{app}\{#Exe}"; Parameters: "--log ""{localappdata}\AtmosBridge\log.txt"""
 Name: "{userprograms}\AtmosBridge\{cm:Log}"; Filename: "{localappdata}\AtmosBridge\log.txt"
 
 [Run]
-Filename: "powershell.exe"; Parameters: "{#ConfScript} -Action add -Path ""{userappdata}\mpv.net\mpv.conf"""; Flags: runhidden; Tasks: mpvnet
-Filename: "powershell.exe"; Parameters: "{#ConfScript} -Action add -Path ""{userappdata}\mpv\mpv.conf"""; Flags: runhidden; Tasks: mpv
-Filename: "{app}\{#Exe}"; Parameters: "{#LogArg}"; Description: "{cm:StartNow}"; Flags: nowait postinstall skipifsilent
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\mpvconf.ps1"" -Action add -Path ""{userappdata}\mpv.net\mpv.conf"""; Flags: runhidden; Tasks: mpvnet
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\mpvconf.ps1"" -Action add -Path ""{userappdata}\mpv\mpv.conf"""; Flags: runhidden; Tasks: mpv
+Filename: "{app}\{#Exe}"; Parameters: "--log ""{localappdata}\AtmosBridge\log.txt"""; Description: "{cm:StartNow}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/f /t /im {#Exe}"; Flags: runhidden; RunOnceId: "StopBridge"
-Filename: "powershell.exe"; Parameters: "{#ConfScript} -Action remove -Path ""{userappdata}\mpv.net\mpv.conf"""; Flags: runhidden; RunOnceId: "ConfMpvNet"
-Filename: "powershell.exe"; Parameters: "{#ConfScript} -Action remove -Path ""{userappdata}\mpv\mpv.conf"""; Flags: runhidden; RunOnceId: "ConfMpv"
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\mpvconf.ps1"" -Action remove -Path ""{userappdata}\mpv.net\mpv.conf"""; Flags: runhidden; RunOnceId: "ConfMpvNet"
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\mpvconf.ps1"" -Action remove -Path ""{userappdata}\mpv\mpv.conf"""; Flags: runhidden; RunOnceId: "ConfMpv"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{localappdata}\AtmosBridge"
