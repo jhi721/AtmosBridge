@@ -1,4 +1,4 @@
-; AtmosBridge per-user installer (Inno Setup 6). Build: ISCC /DMyAppVersion=1.2.3 installer\AtmosBridge.iss
+﻿; AtmosBridge per-user installer (Inno Setup 6). Build: ISCC /DMyAppVersion=1.2.3 installer\AtmosBridge.iss
 ; Expects the self-contained publish in ..\publish (see .github/workflows/build.yml).
 
 #ifndef MyAppVersion
