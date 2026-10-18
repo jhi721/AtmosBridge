@@ -60,6 +60,7 @@ bin\Release\net10.0-windows\AtmosBridge.exe --device {5384faff-9e6b-4060-8de7-b7
 | `--log` | console | log file (windowless build) |
 | `--file x.ec3` | | play a file directly (test); `.thd` (raw TrueHD) goes through thd-objects |
 | `--selftest` | | IEC 61937 / MAT unpacker + resampler checks |
+| `--dump --file x.ec3` | | print every object's position and level once per second (diagnostics) |
 
 Login startup: `Startup\AtmosBridge.lnk` runs the windowless build in `dist\` (`dotnet publish -c Release -o dist
 -p:OutputType=WinExe`) with `--log %LOCALAPPDATA%\AtmosBridge\log.txt`. If the device is busy or spatial sound is

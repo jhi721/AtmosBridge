@@ -115,7 +115,7 @@ sealed class Iec61937Stream(Stream input) : Stream {
     public override bool CanRead => true;
     public override bool CanSeek => false;
     public override bool CanWrite => false;
-    // Cavern sizes its fetch block from Length once (else 10 MB); report one burst so it reads ~32 ms at a time.
+    // Bytes of the current burst still unread (blocks until one is available)
     public override long Length {
         get {
             while (payloadPos == payloadLen && NextBurst()) { }
