@@ -14,6 +14,24 @@ presentation and the OAMD positions/gains per access unit, and the bridge sends 
 Plain (non-Atmos) TrueHD goes the same way, one object per speaker.
 Any other codec (AAC, FLAC, ...) arrives as PCM and is sent as one object per speaker position.
 
+## Install
+
+Download `AtmosBridge-<version>-setup.exe` from Releases (or the `build` workflow artifact) and run it. It installs
+per user (no admin) to `%LOCALAPPDATA%\Programs\AtmosBridge`, self-contained (no .NET runtime needed), and optionally:
+
+- starts the bridge at sign-in (Startup shortcut, log in `%LOCALAPPDATA%\AtmosBridge\log.txt`);
+- adds the mpv settings below to `%APPDATA%\mpv.net\mpv.conf` and/or `%APPDATA%\mpv\mpv.conf`, between
+  `# >>> AtmosBridge` / `# <<< AtmosBridge` markers (first run keeps a `.bak-atmosbridge` copy). Uninstall removes
+  the block again.
+
+Enable **Dolby Atmos for Headphones** (Windows sound settings → device → Spatial audio) on the output device first.
+
+Release: push a tag, CI builds the installer and attaches it to a GitHub release.
+
+```
+git tag v0.1.0 && git push origin v0.1.0
+```
+
 ## How timing works
 
 `ao=pcm` is an "untimed" AO: mpv writes audio in step with its video clock. The bridge keeps a
@@ -35,7 +53,7 @@ bin\Release\net10.0-windows\AtmosBridge.exe --device {5384faff-9e6b-4060-8de7-b7
 
 | Option | Default | |
 |---|---|---|
-| `--device` | default endpoint | render endpoint id (`mpv --audio-device=help`, part after `wasapi/`); spatial sound must be on |
+| `--device` | auto | render endpoint id (`mpv --audio-device=help`, part after `wasapi/`). Auto: the default endpoint if spatial sound is on there, else the first active endpoint that has it |
 | `--pipe` | `atmos` | audio pipe (`ao-pcm-file=\\.\pipe\atmos`) |
 | `--ipc` | `mpv-atmos` | mpv IPC pipe (`input-ipc-server=\\.\pipe\mpv-atmos`) |
 | `--latency` | `0.1` | buffer cushion in seconds |

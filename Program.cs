@@ -238,7 +238,7 @@ static class Program {
         while (running) {
             try {
                 using var output = new SpatialOutput(deviceId);
-                Console.WriteLine($"[{clock.Elapsed.TotalSeconds:0.00}] Spatial endpoint: {output.MaxDynamicObjects} dynamic objects, {output.SampleRate} Hz");
+                Console.WriteLine($"[{clock.Elapsed.TotalSeconds:0.00}] Spatial endpoint {output.DeviceId}: {output.MaxDynamicObjects} dynamic objects, {output.SampleRate} Hz");
                 if (output.SampleRate != sampleRate) {
                     Console.WriteLine($"Warning: spatial engine runs at {output.SampleRate} Hz, bridge assumes {sampleRate} Hz");
                 }

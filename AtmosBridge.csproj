@@ -16,7 +16,8 @@
 
   <ItemGroup>
     <!-- TrueHD helper, built with "cargo build -r" in thd-objects -->
-    <None Include="thd-objects/target/release/thd-objects.exe" Link="thd-objects.exe" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="thd-objects/target/release/thd-objects.exe" Link="thd-objects.exe" CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
   </ItemGroup>
 
 </Project>

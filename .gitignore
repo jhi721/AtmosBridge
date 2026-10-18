@@ -4,3 +4,5 @@ dist/
 thd-objects/target/
 *.user
 .vs/
+publish/
+out/

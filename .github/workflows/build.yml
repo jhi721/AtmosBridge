@@ -1,0 +1,70 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write # release upload on tags
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        shell: pwsh
+        run: |
+          $v = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME.Substring(1) } else { "0.0.$env:GITHUB_RUN_NUMBER" }
+          "VERSION=$v" >> $env:GITHUB_ENV
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: thd-objects
+
+      - name: Build thd-objects (TrueHD helper)
+        working-directory: thd-objects
+        run: cargo build --release --locked
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish AtmosBridge (self-contained, windowless)
+        run: >
+          dotnet publish AtmosBridge.csproj -c Release -r win-x64 --self-contained
+          -p:PublishSingleFile=true -p:OutputType=WinExe -p:Version=${{ env.VERSION }} -o publish
+
+      - name: Self-test
+        shell: pwsh
+        run: |
+          # WinExe: wait explicitly and read the log for the result
+          $p = Start-Process publish/AtmosBridge.exe -ArgumentList '--selftest', '--log', 'selftest.txt' -Wait -PassThru
+          Get-Content selftest.txt
+          if ($p.ExitCode -ne 0) { throw "selftest failed ($($p.ExitCode))" }
+          if (-not (Test-Path publish/thd-objects.exe)) { throw 'thd-objects.exe missing from publish' }
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          & $iscc /Qp "/DMyAppVersion=$env:VERSION" installer/AtmosBridge.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AtmosBridge-${{ env.VERSION }}-setup
+          path: out/*.exe
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*.exe
+          generate_release_notes: true

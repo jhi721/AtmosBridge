@@ -6,9 +6,15 @@ namespace AtmosBridge;
 
 [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 interface IMMDeviceEnumerator {
-    [PreserveSig] int EnumAudioEndpoints(int dataFlow, int stateMask, out IntPtr devices);
+    [PreserveSig] int EnumAudioEndpoints(int dataFlow, int stateMask, out IMMDeviceCollection devices);
     [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice device);
     [PreserveSig] int GetDevice([MarshalAs(UnmanagedType.LPWStr)] string id, out IMMDevice device);
+}
+
+[ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IMMDeviceCollection {
+    [PreserveSig] int GetCount(out uint count);
+    [PreserveSig] int Item(uint index, out IMMDevice device);
 }
 
 [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -73,6 +79,7 @@ sealed class SpatialOutput : IDisposable {
     public ISpatialAudioObjectRenderStream Stream { get; }
     public uint MaxDynamicObjects { get; }
     public int SampleRate { get; }
+    public string DeviceId { get; }
     public AutoResetEvent BufferEvent { get; } = new(false);
 
     readonly IntPtr activationParams, propVariant;
@@ -82,22 +89,36 @@ sealed class SpatialOutput : IDisposable {
         Check(CoCreateInstance(ref clsid, IntPtr.Zero, 1, ref iid, out object e), "MMDeviceEnumerator");
         var enumerator = (IMMDeviceEnumerator)e;
         IMMDevice device;
+        ISpatialAudioClient client;
+        uint maxDynamic;
         if (deviceId == null) {
+            // Default endpoint if spatial sound is on there, else the first active endpoint that has it
             Check(enumerator.GetDefaultAudioEndpoint(0 /* eRender */, 1 /* eMultimedia */, out device), "GetDefaultAudioEndpoint");
+            (client, maxDynamic) = Spatial(device);
+            if (maxDynamic == 0) {
+                Check(enumerator.EnumAudioEndpoints(0 /* eRender */, 1 /* DEVICE_STATE_ACTIVE */, out IMMDeviceCollection all), "EnumAudioEndpoints");
+                all.GetCount(out uint count);
+                for (uint i = 0; i < count && maxDynamic == 0; i++) {
+                    if (all.Item(i, out IMMDevice candidate) >= 0) {
+                        (ISpatialAudioClient candidateClient, uint objects) = Spatial(candidate);
+                        if (objects > 0) {
+                            (device, client, maxDynamic) = (candidate, candidateClient, objects);
+                        }
+                    }
+                }
+            }
         } else {
             if (!deviceId.StartsWith("{0.0.0.")) {
                 deviceId = "{0.0.0.00000000}." + deviceId;
             }
             Check(enumerator.GetDevice(deviceId, out device), "GetDevice " + deviceId);
+            (client, maxDynamic) = Spatial(device);
         }
-
-        Guid iidClient = typeof(ISpatialAudioClient).GUID;
-        Check(device.Activate(ref iidClient, 1, IntPtr.Zero, out object c), "Activate ISpatialAudioClient");
-        var client = (ISpatialAudioClient)c;
-        Check(client.GetMaxDynamicObjectCount(out uint maxDynamic), "GetMaxDynamicObjectCount");
         if (maxDynamic == 0) {
-            throw new InvalidOperationException("Spatial sound is off on this endpoint (0 dynamic objects). Enable Dolby Atmos for Headphones.");
+            throw new InvalidOperationException("Spatial sound is off (0 dynamic objects). Enable Dolby Atmos for Headphones on the output device.");
         }
+        device.GetId(out string id);
+        DeviceId = id;
         MaxDynamicObjects = maxDynamic;
 
         Check(client.GetSupportedAudioObjectFormatEnumerator(out IAudioFormatEnumerator formats), "format enumerator");
@@ -126,6 +147,18 @@ sealed class SpatialOutput : IDisposable {
         Guid iidStream = typeof(ISpatialAudioObjectRenderStream).GUID;
         Check(client.ActivateSpatialAudioStream(propVariant, ref iidStream, out object s), "ActivateSpatialAudioStream");
         Stream = (ISpatialAudioObjectRenderStream)s;
+    }
+
+    /// <summary>
+    /// Spatial client of an endpoint and its dynamic object count (0: spatial sound off or unsupported).
+    /// </summary>
+    static (ISpatialAudioClient, uint) Spatial(IMMDevice device) {
+        Guid iid = typeof(ISpatialAudioClient).GUID;
+        if (device.Activate(ref iid, 1, IntPtr.Zero, out object c) < 0) {
+            return (null, 0);
+        }
+        var client = (ISpatialAudioClient)c;
+        return client.GetMaxDynamicObjectCount(out uint count) < 0 ? (client, 0) : (client, count);
     }
 
     public static void Check(int hr, string what) {
