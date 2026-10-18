@@ -1,0 +1,6 @@
+bin/
+obj/
+dist/
+thd-objects/target/
+*.user
+.vs/
