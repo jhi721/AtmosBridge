@@ -21,6 +21,8 @@ env:
   DOTNET_NOLOGO: 1
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
   DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_SKIP_WORKLOAD_INTEGRITY_CHECK: 1 # first-run work on a fresh VM (~8 s before restore)
+  DOTNET_GENERATE_ASPNET_CERTIFICATE: 0
   NUGET_PACKAGES: D:\nuget # D: is the runner's fast local disk
 
 jobs:
