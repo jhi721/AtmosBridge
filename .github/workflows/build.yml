@@ -70,23 +70,13 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "selftest failed ($($p.ExitCode))" }
           if (-not (Test-Path publish/thd-objects.exe)) { throw 'thd-objects.exe missing from publish' }
 
-      # TEMPORARY: compare installer compression settings (time and size), then pick one
-      - name: Compression probe
-        shell: pwsh
-        run: |
-          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          foreach ($c in @('lzma2/max:1', 'lzma2/max:2', 'lzma2/max:4', 'lzma2/normal:2', 'lzma2/fast:2')) {
-            $comp, $threads = $c -split ':'
-            $t = Measure-Command { & $iscc /Q "/DMyAppVersion=probe" "/DCompression=$comp" "/DBlockThreads=$threads" installer/AtmosBridge.iss }
-            $size = (Get-Item out/AtmosBridge-probe-setup.exe).Length / 1MB
-            "{0,-16} {1,5:0.0} s  {2,5:0.0} MB" -f $c, $t.TotalSeconds, $size
-            Remove-Item out/AtmosBridge-probe-setup.exe
-          }
-
+      # Measured on windows-latest (70 MB payload): lzma2/fast 2 threads 4.6 s / 29 MB, lzma2/max 1 thread 24 s / 24.9 MB,
+      # max 2 threads 18 s / 25 MB (4 threads no faster). Releases get the small file, every other build the fast one.
       - name: Build installer
         shell: pwsh
         run: |
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Qp "/DMyAppVersion=$env:VERSION" installer/AtmosBridge.iss
+          $comp = if ($env:GITHUB_REF -like 'refs/tags/v*') { 'lzma2/max' } else { 'lzma2/fast' }
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Qp "/DMyAppVersion=$env:VERSION" "/DCompression=$comp" installer/AtmosBridge.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
 
       - uses: actions/upload-artifact@v7

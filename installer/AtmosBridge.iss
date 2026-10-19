@@ -7,8 +7,9 @@
 #ifndef Compression
   #define Compression "lzma2/max"
 #endif
+; 2 LZMA2 block threads: the sweet spot on the 4-core CI runner (4 were not faster)
 #ifndef BlockThreads
-  #define BlockThreads "1"
+  #define BlockThreads "2"
 #endif
 #define Exe "AtmosBridge.exe"
 
