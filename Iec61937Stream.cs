@@ -8,6 +8,17 @@ namespace AtmosBridge;
 /// </summary>
 enum Codec { Eac3, TrueHd, Dts }
 
+static class CodecExtensions {
+    /// <summary>
+    /// mpv's audio-spdif names that pass this codec through.
+    /// </summary>
+    public static string SpdifNames(this Codec codec) => codec switch {
+        Codec.Eac3 => "eac3,ac3",
+        Codec.TrueHd => "truehd",
+        _ => "dts-hd,dts",
+    };
+}
+
 /// <summary>
 /// Unwraps IEC 61937 bursts (as written by mpv's spdif passthrough, 16-bit LE words) into the raw bitstream:
 /// E-AC-3 for Cavern, TrueHD (MAT frames) for thd-objects, DTS (core, DTS-HD, DTS:X) for dtsx-objects.
@@ -39,7 +50,7 @@ sealed class Iec61937Stream(Stream input) : Stream {
     /// <summary>
     /// Whether a block (starting on a sample frame) holds a burst: a sync on a 4-byte IEC 60958 frame boundary followed by
     /// a defined data type (up to 22, MAT). The WAV header doesn't tell passthrough from PCM (plain DTS comes as 48 kHz
-    /// stereo). Codecs the bridge doesn't decode (AC-3, AAC, ...) still count: their bursts are skipped, i.e. silence.
+    /// stereo). Codecs the bridge doesn't decode (MPEG, AAC, ...) still count: their bursts are skipped, i.e. silence.
     /// </summary>
     public static bool HasSync(ReadOnlySpan<byte> data) {
         for (int i = 0; i + 5 <= data.Length; i += 4) {

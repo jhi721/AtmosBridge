@@ -19,7 +19,7 @@ $block = @(
     '[atmos-bridge-delay]'
     'profile-cond=get("current-ao") == "pcm"'
     'profile-restore=copy'
-    'audio-delay=-0.26' # measured end to end (bridge buffer + Windows spatial + Dolby): +-25 ms on every codec path
+    'audio-delay=-0.26' # measured end to end, see README (How timing works)
     $end
 )
 

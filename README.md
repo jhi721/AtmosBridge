@@ -49,7 +49,7 @@ Over mpv's JSON IPC (`input-ipc-server`) the bridge freezes the output on pause 
 seek, then prebuffers again. Without IPC it still plays, but pause/seek leave ~0.1 s of stale audio.
 
 End to end (bridge cushion + Windows spatial engine + Dolby renderer) the sound leaves ~0.26 s after mpv writes
-it; `audio-delay=-0.26` lines it up with the picture. Measured with beep test videos and WASAPI loopback: within
+it (`--latency` + ~0.16 s); `audio-delay=-0.26` lines it up with the picture (adjust it together with `--latency`). Measured with beep test videos and WASAPI loopback: within
 -19 ... +33 ms on the PCM, E-AC-3, TrueHD and DTS paths. Pause reaches the output after ~0.23 s, resume ~0.22 s.
 
 ## Fallbacks
@@ -57,8 +57,9 @@ it; `audio-delay=-0.26` lines it up with the picture. Measured with beep test vi
 - Stereo / mono AC-3 and E-AC-3 (no Atmos possible; Cavern can't decode them): `atmosbridge.lua` drops ac3/eac3
   from `audio-spdif` for that file before the decoder opens, so mpv decodes it and the bridge gets PCM.
 - Any passthrough stream a decoder still fails on (e.g. after a manual track switch, TrueHD above 48 kHz): the
-  bridge asks mpv over IPC to decode that codec itself for this file (`file-local-options/audio-spdif`), keeps the
-  pipe flowing meanwhile, and takes the PCM on mpv's reconnect.
+  bridge sends `script-message atmosbridge-decode <codecs>` over IPC; the script drops them from `audio-spdif` for
+  this file and reselects the track, the bridge keeps the pipe flowing meanwhile and takes the PCM on mpv's
+  reconnect. A hand-written mpv.conf without `atmosbridge.lua` gets no such fallback (the stream stays silent).
 - mpv started before the bridge (fell back to WASAPI), or the bridge restarted mid-file: once the bridge has a
   spatial output and sees mpv over IPC, it sends `ao-reload` so mpv reopens its AO and lands on the pipe again.
 - Bridge not running at all: `ao=pcm,wasapi` plays normally through WASAPI, without the bridge's `audio-delay`.

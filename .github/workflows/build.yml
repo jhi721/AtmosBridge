@@ -32,10 +32,12 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Version
+        id: version
         shell: pwsh
         run: |
           $v = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME.Substring(1) } else { "0.0.$env:GITHUB_RUN_NUMBER" }
           "VERSION=$v" >> $env:GITHUB_ENV
+          "dtsx=$(git rev-parse HEAD:dtsx-objects/DTSX_decoder)" >> $env:GITHUB_OUTPUT # submodule commit, from the tree
 
       # thd-objects changes rarely and a cold build takes ~30 min on the runner (the truehd crate itself, not LTO),
       # so cache the finished exe by its sources instead of caching cargo state by compiler version
@@ -51,20 +53,13 @@ jobs:
         working-directory: thd-objects
         run: cargo build --release --locked
 
-      # Same for the DTS helper (~2 min with CMake): key on its sources plus the submodule commit, read from the tree
-      - name: DTSX_decoder commit
-        id: dtsx
-        shell: pwsh
-        run: |
-          $commit = (git ls-tree HEAD dtsx-objects/DTSX_decoder) -split '\s+' | Select-Object -Index 2
-          "commit=$commit" >> $env:GITHUB_OUTPUT
-
+      # Same for the DTS helper (~2 min with CMake): key on its sources plus the submodule commit
       - name: Cache dtsx-objects.exe
         id: dtsxcache
         uses: actions/cache@v6
         with:
           path: dtsx-objects/build/Release/dtsx-objects.exe
-          key: dtsx-objects-${{ steps.dtsx.outputs.commit }}-${{ hashFiles('dtsx-objects/main.cpp', 'dtsx-objects/CMakeLists.txt') }}
+          key: dtsx-objects-${{ steps.version.outputs.dtsx }}-${{ hashFiles('dtsx-objects/main.cpp', 'dtsx-objects/CMakeLists.txt') }}
 
       - name: Build dtsx-objects (DTS helper)
         if: steps.dtsxcache.outputs.cache-hit != 'true'

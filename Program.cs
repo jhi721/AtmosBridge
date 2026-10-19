@@ -30,7 +30,7 @@ static class Program {
     static readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
 
     /// <summary>
-    /// Bridge latency the buffer is held at (--latency). mpv's audio-delay should be about -(this + 0.05).
+    /// Bridge latency the buffer is held at (--latency). mpv's audio-delay should be about -(this + 0.16): Windows spatial + Dolby add ~0.16 s.
     /// </summary>
     static int targetSamples = sampleRate / 10;
 
@@ -93,15 +93,15 @@ static class Program {
         };
         MpvIpc.PlaybackRestart += () => discarding = false;
         // mpv started before the bridge (fell back to WASAPI) or the bridge restarted mid-file (mpv's pcm AO lost the pipe):
-        // once the bridge can play, ask mpv to reopen its AO, which tries the pipe first
-        MpvIpc.Connected += () => Task.Run(() => {
-            Thread.Sleep(1500); // a normal start connects the audio pipe right after IPC
-            if (outputReady && !sessionActive && MpvIpc.Request("get_property", "current-ao") is System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.String } ao
-                && ao.GetString() is "pcm" or "wasapi" && !sessionActive) {
-                Log($"mpv plays to {ao.GetString()} without the bridge: reopening its audio output");
-                MpvIpc.Request("ao-reload");
+        // once the bridge can play, ask mpv to reopen its AO, which tries the pipe first. Checked a second after mpv's
+        // AO changes (or IPC connects) or the spatial output opens, so a normal start has connected the pipe by then.
+        aoCheck = new Timer(_ => {
+            if (outputReady && !sessionActive && MpvIpc.CurrentAo is "pcm" or "wasapi") {
+                Log($"mpv plays to {MpvIpc.CurrentAo} without the bridge: reopening its audio output");
+                MpvIpc.Command("ao-reload");
             }
         });
+        MpvIpc.AoChanged += CheckAoSoon;
         new Thread(() => MpvIpc.Run(ipcName, () => running, Log)) { IsBackground = true }.Start();
 
         if (file != null) {
@@ -118,14 +118,21 @@ static class Program {
                 sessionActive = true;
                 next = Listen();
                 Stream input = new BufferedStream(pipe, 16384);
-                Codec? passthrough = null;
-                WaveFormat format = null;
                 try {
-                    format = WaveFormat.Read(input);
+                    WaveFormat format = WaveFormat.Read(input);
                     if (OpenBitstream(format, ref input) is (Codec codec, Stream bitstream)) {
-                        passthrough = codec;
                         Log($"mpv connected: {codec} passthrough");
-                        Pump(Chunks(codec, bitstream));
+                        try {
+                            Pump(Chunks(codec, bitstream));
+                        } catch (Exception e) when (e is not IOException && e is not EndOfStreamException && pipe.IsConnected) {
+                            // A stream our decoders can't take (TrueHD above 48 kHz, a track switched to stereo E-AC-3, ...):
+                            // atmosbridge.lua has mpv decode that codec itself, it comes back as PCM on the next connection.
+                            // Keep reading the pipe at its real rate meanwhile: mpv's AO thread is blocked writing to it
+                            // (closing it makes the untimed AO race through the file before the change applies).
+                            Log($"Decode error, handing {codec} back to mpv: {e}");
+                            MpvIpc.Command("script-message", "atmosbridge-decode", codec.SpdifNames());
+                            Drain(input, format.SampleRate * format.Channels * 2);
+                        }
                     } else if (format.SampleRate == sampleRate && format.Bits is 8 or 16 or 32) {
                         Log($"mpv connected: PCM {format}");
                         Pump(PcmSource.Read(input, format, blockSize));
@@ -136,19 +143,6 @@ static class Program {
                     // mpv closed the pipe (stop, track change)
                 } catch (Exception e) {
                     Log("Decode error: " + e);
-                    // A stream our decoders can't take (Cavern: stereo/mono E-AC-3; TrueHD above 48 kHz; ...):
-                    // let mpv decode it instead, it comes back as PCM on the next connection. Keep reading the pipe
-                    // at its real rate meanwhile: mpv's AO thread is blocked writing to it (closing it instead makes
-                    // the untimed AO race through the file), and mpv reopens the AO once the change applies.
-                    if (passthrough is Codec failed) {
-                        string[] codecs = failed switch {
-                            Codec.Eac3 => ["eac3", "ac3"],
-                            Codec.TrueHd => ["truehd"],
-                            _ => ["dts-hd", "dts"],
-                        };
-                        var asked = Task.Run(() => MpvIpc.DecodeInMpv(codecs, Log));
-                        Drain(input, format.SampleRate * format.Channels * 2, () => asked.IsCompleted && !asked.Result);
-                    }
                 }
                 sessionActive = false;
                 Log("mpv disconnected");
@@ -159,18 +153,22 @@ static class Program {
         return 0;
     }
 
+    static Timer aoCheck;
+
+    static void CheckAoSoon() => aoCheck?.Change(1000, Timeout.Infinite);
+
     /// <summary>
-    /// Discard the pipe at its real byte rate until mpv closes it (at most 5 s, or once <paramref name="giveUp"/>).
+    /// Discard the pipe at its real byte rate until mpv closes it (at most 5 s).
     /// </summary>
-    static void Drain(Stream input, int bytesPerSecond, Func<bool> giveUp) {
+    static void Drain(Stream input, int bytesPerSecond) {
         byte[] block = new byte[bytesPerSecond / 100];
-        var clock = System.Diagnostics.Stopwatch.StartNew();
+        long start = clock.ElapsedMilliseconds;
         try {
-            for (long sent = 0; clock.ElapsedMilliseconds < 5000 && !giveUp(); sent += block.Length) {
+            for (long sent = 0; clock.ElapsedMilliseconds - start < 5000; sent += block.Length) {
                 if (input.ReadAtLeast(block, block.Length, false) < block.Length) {
                     return; // mpv reopened the AO
                 }
-                int ahead = (int)(sent * 1000 / bytesPerSecond - clock.ElapsedMilliseconds);
+                int ahead = (int)(sent * 1000 / bytesPerSecond - (clock.ElapsedMilliseconds - start));
                 if (ahead > 0) {
                     Thread.Sleep(ahead);
                 }
@@ -356,24 +354,16 @@ static class Program {
         wire.Write([0xAA, 0x72]); // junk incl. a partial sync byte
         Burst(wire, 21, frameA.Length, frameA);
         Burst(wire, 21, frameB.Length, frameB);
+        Burst(wire, 1, frameA.Length * 8, frameA); // AC-3: type 1, Pd in bits, same decoder
         wire.Write([0x72, 0xF8, 0x1F, 0x4E, 0, 0, 4, 0, 0, 0, 0, 0]); // pause burst (type 0) is skipped
         wire.Position = 0;
 
         var iec = new Iec61937Stream(wire);
-        byte[] expected = [.. frameA, .. frameB], got = new byte[expected.Length];
+        byte[] expected = [.. frameA, .. frameB, .. frameA], got = new byte[expected.Length];
         bool ok = iec.WaitForCodec() == Codec.Eac3 && iec.Length == frameA.Length && iec.Read(got, 0, got.Length) == got.Length
             && got.SequenceEqual(expected) && iec.Read(new byte[1], 0, 1) == 0 && iec.EndOfInput;
         Console.WriteLine(ok ? "IEC 61937 OK" : "IEC 61937 FAILED: " + Convert.ToHexString(got));
 
-        // AC-3 (type 1, Pd in bits) goes to the E-AC-3 decoder like E-AC-3
-        var ac3Wire = new MemoryStream();
-        Burst(ac3Wire, 1, frameA.Length * 8, frameA);
-        ac3Wire.Position = 0;
-        var ac3 = new Iec61937Stream(ac3Wire);
-        byte[] ac3Got = new byte[frameA.Length];
-        bool ac3Ok = ac3.WaitForCodec() == Codec.Eac3 && ac3.Read(ac3Got, 0, ac3Got.Length) == ac3Got.Length && ac3Got.SequenceEqual(frameA);
-        Console.WriteLine(ac3Ok ? "AC-3 OK" : "AC-3 FAILED: " + Convert.ToHexString(ac3Got));
-        ok &= ac3Ok;
 
         // DTS type I (Pd in bits) and DTS-HD (start code + frame size, Pd padded past the frame): bare frames come back
         byte[] core = [0x7F, 0xFE, 0x80, 0x01, 1, 2], hd = [0x64, 0x58, 0x20, 0x25, 3, 4, 5, 6];
@@ -501,15 +491,12 @@ static class Program {
                     Console.WriteLine($"Warning: spatial engine runs at {output.SampleRate} Hz, bridge assumes {sampleRate} Hz");
                 }
                 outputReady = true;
-                try {
-                    RenderLoop(output);
-                } finally {
-                    outputReady = false;
-                }
+                CheckAoSoon(); // mpv may be playing elsewhere while the output was missing
+                RenderLoop(output);
             } catch (Exception e) {
                 Log($"Spatial output unavailable: {e.Message}");
             }
-            playing = false;
+            outputReady = playing = false;
             while (queue.TryTake(out _)) { }
             Interlocked.Exchange(ref buffered, 0);
             for (int i = 0; i < 300 && running; i++) { // retry in 3 s, consuming one 10 ms block per 10 ms
