@@ -15,11 +15,13 @@ namespace AtmosBridge;
 /// One decoded block: mono samples, position and gain for every Cavern object.
 /// </summary>
 sealed record Chunk(float[][] Samples, Vector3[] Positions, float[] Volumes, bool[] Lfe) {
+    public Chunk(int channels) : this(new float[channels][], new Vector3[channels], new float[channels], new bool[channels]) { }
+
     public int Length => Samples.Length == 0 ? 0 : Samples[0].Length;
 }
 
 static class Program {
-    const int sampleRate = 48000; // Windows spatial audio object format
+    internal const int sampleRate = 48000; // Windows spatial audio object format
     const int blockSize = 480; // 10 ms @ 48 kHz, matches the spatial engine's period
     const float roomScale = 1; // meters from listener to the Atmos room wall
 
@@ -64,16 +66,7 @@ static class Program {
             return SelfTest();
         }
         if (args.Contains("--dump")) { // diagnostics: object positions and levels once per second of --file
-            // .ec3 goes through the same decoder setup as live passthrough
-            // .wav: a capture of mpv's ao=pcm spdif output (--ao-pcm-file=x.wav), unwrapped like the live pipe
-            (Renderer renderer, int rate) = file.EndsWith(".ec3", StringComparison.OrdinalIgnoreCase) ? OpenEac3(File.OpenRead(file))
-                : file.EndsWith(".wav", StringComparison.OrdinalIgnoreCase) ? OpenSpdifCapture(file)
-                : OpenFile(file);
-            static (Renderer, int) OpenSpdifCapture(string path) {
-                var input = new BufferedStream(File.OpenRead(path));
-                WaveFormat.Read(input);
-                return OpenEac3(new Iec61937Stream(input));
-            }
+            (Renderer renderer, int rate) = OpenFile(file);
             Vector3 roomInverse = Vector3.One / Listener.EnvironmentSize;
             for (int second = 0; second < 60 * 15; second++) {
                 float[][] samples = renderer.GetNextObjectSamples(rate);
@@ -101,9 +94,9 @@ static class Program {
         new Thread(() => MpvIpc.Run(ipcName, () => running, Log)) { IsBackground = true }.Start();
 
         if (file != null && file.EndsWith(".thd", StringComparison.OrdinalIgnoreCase)) {
-            Pump(TrueHdSource.Read(File.OpenRead(file), blockSize, roomScale, Log));
+            Pump(TrueHdSource.Read(File.OpenRead(file), blockSize, Log));
         } else if (file != null) {
-            Pump(CavernChunks(() => OpenFile(file), () => false));
+            Pump(CavernChunks(OpenFile(file), () => false));
         } else {
             while (running) {
                 using var pipe = new NamedPipeServerStream(pipeName, PipeDirection.In, 1, PipeTransmissionMode.Byte,
@@ -114,15 +107,15 @@ static class Program {
                 try {
                     WaveFormat format = WaveFormat.Read(input);
                     if (format.IsSpdif) {
-                        Console.WriteLine($"[{clock.Elapsed.TotalSeconds:0.00}] mpv connected: E-AC-3 passthrough");
+                        Log("mpv connected: E-AC-3 passthrough");
                         var iec = new Iec61937Stream(input);
-                        Pump(CavernChunks(() => OpenEac3(iec), () => iec.EndOfInput));
+                        Pump(CavernChunks(OpenEac3(iec), () => iec.EndOfInput));
                     } else if (format.IsHbr) {
-                        Console.WriteLine($"[{clock.Elapsed.TotalSeconds:0.00}] mpv connected: TrueHD passthrough");
-                        Pump(TrueHdSource.Read(new Iec61937Stream(input), blockSize, roomScale, Log));
+                        Log("mpv connected: TrueHD passthrough");
+                        Pump(TrueHdSource.Read(new Iec61937Stream(input), blockSize, Log));
                     } else if (format.SampleRate == sampleRate && format.Bits is 8 or 16 or 32) {
-                        Console.WriteLine($"[{clock.Elapsed.TotalSeconds:0.00}] mpv connected: PCM {format}");
-                        Pump(PcmSource.Read(input, format, blockSize, roomScale));
+                        Log($"mpv connected: PCM {format}");
+                        Pump(PcmSource.Read(input, format, blockSize));
                     } else {
                         Console.WriteLine($"Unsupported PCM {format}: set audio-samplerate={sampleRate} in mpv");
                     }
@@ -131,7 +124,7 @@ static class Program {
                 } catch (Exception e) {
                     Log("Decode error: " + e);
                 }
-                Console.WriteLine($"[{clock.Elapsed.TotalSeconds:0.00}] mpv disconnected");
+                Log("mpv disconnected");
             }
         }
         running = false;
@@ -169,15 +162,30 @@ static class Program {
     }
 
     /// <summary>
-    /// E-AC-3 from mpv's passthrough. Built directly instead of via EnhancedAC3Reader: its stream constructor divides
-    /// by a frame size it measures from offsets inside its read blocks, which is 0 when frames sit on block boundaries
-    /// (e.g. one 5.1 JOC frame per IEC burst). Small blocks also keep decode latency low.
+    /// --file / --dump input. .ec3 goes through the same decoder setup as live passthrough;
+    /// a spdif .wav (capture of mpv's ao=pcm output, --ao-pcm-file=x.wav) is unwrapped like the live pipe;
+    /// anything else, plain PCM .wav included, goes to Cavern's AudioReader.
     /// </summary>
     static (Renderer, int) OpenFile(string path) {
+        if (path.EndsWith(".ec3", StringComparison.OrdinalIgnoreCase)) {
+            return OpenEac3(File.OpenRead(path));
+        }
+        if (path.EndsWith(".wav", StringComparison.OrdinalIgnoreCase)) {
+            var input = new BufferedStream(File.OpenRead(path));
+            if (WaveFormat.Read(input).IsSpdif) {
+                return OpenEac3(new Iec61937Stream(input));
+            }
+            input.Dispose();
+        }
         AudioReader reader = AudioReader.Open(path);
         return (reader.GetRenderer(), reader.SampleRate);
     }
 
+    /// <summary>
+    /// E-AC-3 from mpv's passthrough. Built directly instead of via EnhancedAC3Reader: its stream constructor divides
+    /// by a frame size it measures from offsets inside its read blocks, which is 0 when frames sit on block boundaries
+    /// (e.g. one 5.1 JOC frame per IEC burst). Small blocks also keep decode latency low.
+    /// </summary>
     static (Renderer, int) OpenEac3(Stream raw) {
         var decoder = new EnhancedAC3Decoder(BlockBuffer<byte>.Create(raw, 1024));
         return (new EnhancedAC3Renderer(decoder), decoder.SampleRate);
@@ -186,22 +194,22 @@ static class Program {
     /// <summary>
     /// Pull object blocks from Cavern until the input ends.
     /// </summary>
-    static IEnumerable<Chunk> CavernChunks(Func<(Renderer renderer, int rate)> open, Func<bool> ended) {
-        (Renderer renderer, int rate) = open();
+    static IEnumerable<Chunk> CavernChunks((Renderer renderer, int rate) source, Func<bool> ended) {
+        (Renderer renderer, int rate) = source;
         if (rate != sampleRate) {
             throw new NotSupportedException($"Stream is {rate} Hz, spatial engine wants {sampleRate} Hz");
         }
         IReadOnlyList<Source> objects = renderer.Objects;
-        Console.WriteLine($"[{clock.Elapsed.TotalSeconds:0.00}] Decoding: {objects.Count} objects, has objects (JOC): {renderer.HasObjects}");
+        Log($"Decoding: {objects.Count} objects, has objects (JOC): {renderer.HasObjects}");
         Vector3 roomInverse = Vector3.One / Listener.EnvironmentSize;
 
         while (!ended()) {
             float[][] samples = renderer.GetNextObjectSamples(blockSize);
-            var chunk = new Chunk(new float[objects.Count][], new Vector3[objects.Count], new float[objects.Count], new bool[objects.Count]);
+            var chunk = new Chunk(objects.Count);
             for (int i = 0; i < objects.Count; i++) {
-                chunk.Samples[i] = (float[])samples[i].Clone(); // ponytail: allocates ~2 MB/s, pool if GC shows up
+                chunk.Samples[i] = samples[i]; // Cavern reuses it, but Pump's resampler copies before the next block
                 Vector3 p = objects[i].Position * roomInverse; // Cavern: x right, y up, z front, room cube [-1, 1]
-                chunk.Positions[i] = new Vector3(p.X, p.Y, -p.Z) * roomScale; // Windows: -z is front
+                chunk.Positions[i] = new Vector3(p.X, p.Y, -p.Z); // Windows: -z is front
                 chunk.Volumes[i] = objects[i].Volume;
                 chunk.Lfe[i] = objects[i].LFE;
             }
@@ -277,13 +285,13 @@ static class Program {
         while (running) {
             try {
                 using var output = new SpatialOutput(deviceId);
-                Console.WriteLine($"[{clock.Elapsed.TotalSeconds:0.00}] Spatial endpoint {output.DeviceId}: {output.MaxDynamicObjects} dynamic objects, {output.SampleRate} Hz");
+                Log($"Spatial endpoint {output.DeviceId}: {output.MaxDynamicObjects} dynamic objects, {output.SampleRate} Hz");
                 if (output.SampleRate != sampleRate) {
                     Console.WriteLine($"Warning: spatial engine runs at {output.SampleRate} Hz, bridge assumes {sampleRate} Hz");
                 }
                 RenderLoop(output);
             } catch (Exception e) {
-                Console.WriteLine($"[{clock.Elapsed.TotalSeconds:0.00}] Spatial output unavailable: {e.Message}");
+                Log($"Spatial output unavailable: {e.Message}");
             }
             playing = false;
             while (queue.TryTake(out _)) { }
@@ -313,7 +321,7 @@ static class Program {
         var buffers = new List<IntPtr>();
         Chunk current = null;
         int currentPos = 0;
-        bool started = false, prebuffering = true;
+        bool prebuffering = true;
         int handledFlush = flushRequests;
         long periods = 0, underruns = 0;
         float maxHeight = 0; // highest audible object since the last status line
@@ -332,11 +340,8 @@ static class Program {
             return dynamic < slots.Count ? dynamic : -1;
         }
 
+        SpatialOutput.Check(stream.Start(), "Start");
         while (running) {
-            if (!started) {
-                SpatialOutput.Check(stream.Start(), "Start");
-                started = true;
-            }
             output.BufferEvent.WaitOne(100);
             int hr = stream.BeginUpdatingAudioObjects(out _, out uint frames);
             if (hr < 0) {
@@ -407,9 +412,9 @@ static class Program {
                 for (int i = 0; i < current.Samples.Length; i++) {
                     int slot = Slot(current, i);
                     if (slot > 0) {
-                        Vector3 p = current.Positions[i];
+                        Vector3 p = current.Positions[i] * roomScale;
                         slots[slot].SetPosition(p.X, p.Y, p.Z);
-                        if (p.Y > maxHeight && current.Samples[i].Any(x => Math.Abs(x) > 1e-4f)) {
+                        if (p.Y > maxHeight && current.Samples[i].AsSpan().ContainsAnyExceptInRange(-1e-4f, 1e-4f)) {
                             maxHeight = p.Y;
                         }
                     }

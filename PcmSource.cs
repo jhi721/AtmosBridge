@@ -70,14 +70,14 @@ static class PcmSource {
     /// <summary>
     /// Deinterleave blocks of PCM into chunks until the stream ends.
     /// </summary>
-    public static IEnumerable<Chunk> Read(Stream s, WaveFormat f, int blockSize, float roomScale) {
+    public static IEnumerable<Chunk> Read(Stream s, WaveFormat f, int blockSize) {
         uint mask = f.ChannelMask != 0 ? f.ChannelMask : DefaultMask(f.Channels);
         var positions = new Vector3[f.Channels];
         var lfe = new bool[f.Channels];
         for (int ch = 0, bit = 0; ch < f.Channels && bit < 32; bit++) {
             if ((mask & (1u << bit)) != 0) {
                 lfe[ch] = bit == 3;
-                positions[ch] = bit < speakerPositions.Length ? speakerPositions[bit] * roomScale : default;
+                positions[ch] = bit < speakerPositions.Length ? speakerPositions[bit] : default;
                 ch++;
             }
         }
@@ -85,15 +85,7 @@ static class PcmSource {
 
         int bytesPerSample = f.Bits / 8, frameBytes = bytesPerSample * f.Channels;
         byte[] raw = new byte[frameBytes * blockSize];
-        while (true) {
-            int got = 0;
-            while (got < raw.Length) {
-                int n = s.Read(raw, got, raw.Length - got);
-                if (n <= 0) {
-                    yield break;
-                }
-                got += n;
-            }
+        while (s.ReadAtLeast(raw, raw.Length, false) == raw.Length) {
             var samples = new float[f.Channels][];
             for (int ch = 0; ch < f.Channels; ch++) {
                 samples[ch] = new float[blockSize];

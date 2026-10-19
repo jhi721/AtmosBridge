@@ -1,3 +1,6 @@
+using System.Buffers.Binary;
+using System.Runtime.InteropServices;
+
 namespace AtmosBridge;
 
 /// <summary>
@@ -12,14 +15,12 @@ sealed class Iec61937Stream(Stream input) : Stream {
 
     byte[] payload = [];
     int payloadPos, payloadLen;
-    readonly byte[] header = new byte[8];
+    readonly byte[] header = new byte[4];
 
     /// <summary>
     /// The pipe closed (mpv closed the AO): the decoder should stop.
     /// </summary>
     public bool EndOfInput { get; private set; }
-
-    public long Bursts { get; private set; }
 
     // Cavern assumes Read fills the whole request (like its own QueueStream), so block until it does.
     public override int Read(byte[] buffer, int offset, int count) {
@@ -68,12 +69,10 @@ sealed class Iec61937Stream(Stream input) : Stream {
             payloadPos = payloadLen = 0; // pause bursts, AC-3 etc.: skip
             return true;
         }
-        for (int i = 0; i < padded; i += 2) {
-            (payload[i], payload[i + 1]) = (payload[i + 1], payload[i]);
-        }
+        Span<ushort> words = MemoryMarshal.Cast<byte, ushort>(payload.AsSpan(0, padded));
+        BinaryPrimitives.ReverseEndianness(words, words);
         payloadPos = 0;
         payloadLen = dataType == typeTrueHd ? UnwrapMat(length) : length;
-        Bursts++;
         return true;
     }
 
@@ -100,17 +99,7 @@ sealed class Iec61937Stream(Stream input) : Stream {
         return w;
     }
 
-    bool ReadExact(byte[] buf, int count) {
-        int got = 0;
-        while (got < count) {
-            int n = input.Read(buf, got, count - got);
-            if (n <= 0) {
-                return false;
-            }
-            got += n;
-        }
-        return true;
-    }
+    bool ReadExact(byte[] buf, int count) => input.ReadAtLeast(buf.AsSpan(0, count), count, false) == count;
 
     public override bool CanRead => true;
     public override bool CanSeek => false;

@@ -8,7 +8,7 @@ namespace AtmosBridge;
 /// decoded channels with positions come back on its stdout. See thd-objects/src/main.rs for the framing.
 /// </summary>
 static class TrueHdSource {
-    public static IEnumerable<Chunk> Read(Stream thd, int blockSize, float roomScale, Action<string> log) {
+    public static IEnumerable<Chunk> Read(Stream thd, int blockSize, Action<string> log) {
         var helper = Process.Start(new ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, "thd-objects.exe")) {
             RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
             UseShellExecute = false, CreateNoWindow = true,
@@ -46,28 +46,25 @@ static class TrueHdSource {
                 if (stdout.ReadAtLeast(au.AsSpan(8, size), size, false) != size) {
                     yield break; // helper killed mid-frame
                 }
-                if (rate != 48000) {
-                    throw new NotSupportedException($"TrueHD at {rate} Hz, spatial engine wants 48000 Hz");
-                }
-                var chunk = new Chunk(new float[channels][], new Vector3[channels], new float[channels], new bool[channels]);
-                int o = 8;
-                for (int ch = 0; ch < channels; ch++, o += 17) {
-                    chunk.Positions[ch] = new Vector3(BitConverter.ToSingle(au, o), BitConverter.ToSingle(au, o + 4), BitConverter.ToSingle(au, o + 8)) * roomScale;
-                    chunk.Volumes[ch] = BitConverter.ToSingle(au, o + 12);
-                    chunk.Lfe[ch] = au[o + 16] != 0;
+                if (rate != Program.sampleRate) {
+                    throw new NotSupportedException($"TrueHD at {rate} Hz, spatial engine wants {Program.sampleRate} Hz");
                 }
                 if (pending.Length != channels) { // layout change: start over
                     pending = Enumerable.Range(0, channels).Select(_ => new List<float>(blockSize)).ToArray();
                     pendingLength = 0;
                 }
-                for (int i = 0; i < samples; i++) {
+                for (int i = 0, o = 8 + channels * 17; i < samples; i++) {
                     for (int ch = 0; ch < channels; ch++, o += 4) {
                         pending[ch].Add(BitConverter.ToSingle(au, o));
                     }
                 }
                 pendingLength += samples;
                 if (pendingLength >= blockSize) { // 12 access units of 40 samples; positions of the last one
-                    for (int ch = 0; ch < channels; ch++) {
+                    var chunk = new Chunk(channels);
+                    for (int ch = 0, o = 8; ch < channels; ch++, o += 17) {
+                        chunk.Positions[ch] = new Vector3(BitConverter.ToSingle(au, o), BitConverter.ToSingle(au, o + 4), BitConverter.ToSingle(au, o + 8));
+                        chunk.Volumes[ch] = BitConverter.ToSingle(au, o + 12);
+                        chunk.Lfe[ch] = au[o + 16] != 0;
                         chunk.Samples[ch] = [.. pending[ch]];
                         pending[ch].Clear();
                     }

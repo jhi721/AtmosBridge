@@ -73,8 +73,8 @@ static class AudioObjectType {
 /// Owns a Windows spatial audio object stream on one render endpoint.
 /// </summary>
 sealed class SpatialOutput : IDisposable {
-    [DllImport("ole32.dll")]
-    static extern int CoCreateInstance(ref Guid clsid, IntPtr outer, int ctx, ref Guid iid, [MarshalAs(UnmanagedType.IUnknown)] out object obj);
+    [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+    class MMDeviceEnumerator { }
 
     public ISpatialAudioObjectRenderStream Stream { get; }
     public uint MaxDynamicObjects { get; }
@@ -85,9 +85,7 @@ sealed class SpatialOutput : IDisposable {
     readonly IntPtr activationParams, propVariant;
 
     public SpatialOutput(string deviceId) {
-        Guid clsid = new("BCDE0395-E52F-467C-8E3D-C4579291692E"), iid = typeof(IMMDeviceEnumerator).GUID;
-        Check(CoCreateInstance(ref clsid, IntPtr.Zero, 1, ref iid, out object e), "MMDeviceEnumerator");
-        var enumerator = (IMMDeviceEnumerator)e;
+        var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
         IMMDevice device;
         ISpatialAudioClient client;
         uint maxDynamic;
@@ -137,11 +135,8 @@ sealed class SpatialOutput : IDisposable {
 
         // PROPVARIANT { VT_BLOB, cbSize, pBlobData }
         propVariant = Marshal.AllocHGlobal(24);
-        for (int i = 0; i < 24; i++) {
-            Marshal.WriteByte(propVariant, i, 0);
-        }
-        Marshal.WriteInt16(propVariant, 0, 65);
-        Marshal.WriteInt32(propVariant, 8, 40);
+        Marshal.WriteInt64(propVariant, 0, 65); // vt + reserved words
+        Marshal.WriteInt64(propVariant, 8, 40); // cbSize + padding
         Marshal.WriteIntPtr(propVariant, 16, activationParams);
 
         Guid iidStream = typeof(ISpatialAudioObjectRenderStream).GUID;
