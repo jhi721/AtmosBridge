@@ -4,12 +4,15 @@ using System.Numerics;
 namespace AtmosBridge;
 
 /// <summary>
-/// TrueHD (Atmos) through the thd-objects helper (Rust, truehd crate): raw TrueHD goes to its stdin,
-/// decoded channels with positions come back on its stdout. See thd-objects/src/main.rs for the framing.
+/// Decoding helper process: the raw bitstream goes to its stdin, decoded channels with positions come back on its
+/// stdout. thd-objects (Rust, truehd crate) for TrueHD, dtsx-objects (C++, DTSX_decoder) for DTS.
+/// See thd-objects/src/main.rs for the framing.
 /// </summary>
-static class TrueHdSource {
-    public static IEnumerable<Chunk> Read(Stream thd, int blockSize, Action<string> log) {
-        var helper = Process.Start(new ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, "thd-objects.exe")) {
+static class HelperSource {
+    public const string TrueHd = "thd-objects.exe", Dts = "dtsx-objects.exe";
+
+    public static IEnumerable<Chunk> Read(string exe, Stream input, int blockSize, Action<string> log) {
+        var helper = Process.Start(new ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, exe)) {
             RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
             UseShellExecute = false, CreateNoWindow = true,
         });
@@ -25,7 +28,7 @@ static class TrueHdSource {
             Stream stdin = helper.StandardInput.BaseStream;
             try {
                 int n;
-                while ((n = thd.Read(buffer, 0, buffer.Length)) > 0) {
+                while ((n = input.Read(buffer, 0, buffer.Length)) > 0) {
                     stdin.Write(buffer, 0, n);
                     stdin.Flush();
                 }
@@ -43,11 +46,14 @@ static class TrueHdSource {
             while (stdout.ReadAtLeast(au.AsSpan(0, 8), 8, false) == 8) {
                 int channels = BitConverter.ToUInt16(au, 0), samples = BitConverter.ToUInt16(au, 2), rate = BitConverter.ToInt32(au, 4);
                 int size = channels * 17 + samples * channels * 4;
+                if (au.Length < 8 + size) { // DTS frames are up to 4096 samples
+                    Array.Resize(ref au, 8 + size);
+                }
                 if (stdout.ReadAtLeast(au.AsSpan(8, size), size, false) != size) {
                     yield break; // helper killed mid-frame
                 }
                 if (rate != Program.sampleRate) {
-                    throw new NotSupportedException($"TrueHD at {rate} Hz, spatial engine wants {Program.sampleRate} Hz");
+                    throw new NotSupportedException($"Stream at {rate} Hz, spatial engine wants {Program.sampleRate} Hz");
                 }
                 if (pending.Length != channels) { // layout change: start over
                     pending = Enumerable.Range(0, channels).Select(_ => new List<float>(blockSize)).ToArray();

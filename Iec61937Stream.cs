@@ -5,17 +5,45 @@ namespace AtmosBridge;
 
 /// <summary>
 /// Unwraps IEC 61937 bursts (as written by mpv's spdif passthrough, 16-bit LE words) into the raw bitstream:
-/// E-AC-3 for Cavern, or TrueHD (MAT frames) for thd-objects.
+/// E-AC-3 for Cavern, TrueHD (MAT frames) for thd-objects, DTS (core, DTS-HD, DTS:X) for dtsx-objects.
 /// </summary>
 sealed class Iec61937Stream(Stream input) : Stream {
-    const int typeEac3 = 21, typeTrueHd = 22;
+    const int typeDts1 = 11, typeDts3 = 13, typeDtsHd = 17, typeEac3 = 21, typeTrueHd = 22;
     const int matMiddle = 30708; // MAT frame: 20-byte start code, 12-byte middle code here, 16-byte end code
 
     int auLeft; // bytes of the current TrueHD access unit still to copy (MAT zero-pads between them)
 
     byte[] payload = [];
-    int payloadPos, payloadLen;
+    int payloadPos, payloadLen, dataType;
     readonly byte[] header = new byte[4];
+
+    /// <summary>
+    /// Codec of the first data burst ("E-AC-3", "TrueHD", "DTS"), null if the input ends before one. Blocks until then.
+    /// </summary>
+    public string Codec {
+        get {
+            _ = Length;
+            return dataType switch {
+                typeEac3 => "E-AC-3",
+                typeTrueHd => "TrueHD",
+                typeDtsHd or (>= typeDts1 and <= typeDts3) => "DTS",
+                _ => null,
+            };
+        }
+    }
+
+    /// <summary>
+    /// Whether a block of 16-bit words contains a burst sync (Pa/Pb). mpv sends plain DTS as 48 kHz stereo,
+    /// which the WAV header doesn't tell apart from PCM.
+    /// </summary>
+    public static bool HasSync(ReadOnlySpan<byte> data) {
+        for (int i = 0; i + 4 <= data.Length; i += 2) {
+            if (data[i] == 0x72 && data[i + 1] == 0xF8 && data[i + 2] == 0x1F && data[i + 3] == 0x4E) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     /// <summary>
     /// The pipe closed (mpv closed the AO): the decoder should stop.
@@ -56,8 +84,12 @@ sealed class Iec61937Stream(Stream input) : Stream {
         if (!ReadExact(header, 4)) {
             return false;
         }
-        int dataType = header[0] & 0x1F;
-        int length = header[2] | header[3] << 8; // E-AC-3 and TrueHD: Pd is in bytes
+        int type = header[0] & 0x1F;
+        bool dts = type is >= typeDts1 and <= typeDts3;
+        int length = header[2] | header[3] << 8; // E-AC-3, TrueHD, DTS-HD: Pd is in bytes
+        if (dts) {
+            length >>= 3; // DTS type I-III: in bits
+        }
         int padded = (length + 1) & ~1;
         if (payload.Length < padded) {
             payload = new byte[padded];
@@ -65,15 +97,27 @@ sealed class Iec61937Stream(Stream input) : Stream {
         if (!ReadExact(payload, padded)) {
             return false;
         }
-        if (dataType != typeEac3 && (dataType != typeTrueHd || length != 61424)) {
+        if (type != typeEac3 && type != typeDtsHd && !dts && (type != typeTrueHd || length != 61424)) {
             payloadPos = payloadLen = 0; // pause bursts, AC-3 etc.: skip
             return true;
         }
         Span<ushort> words = MemoryMarshal.Cast<byte, ushort>(payload.AsSpan(0, padded));
         BinaryPrimitives.ReverseEndianness(words, words);
-        payloadPos = 0;
-        payloadLen = dataType == typeTrueHd ? UnwrapMat(length) : length;
+        dataType = type;
+        (payloadPos, payloadLen) = type switch {
+            typeTrueHd => (0, UnwrapMat(length)),
+            typeDtsHd => DtsHdFrame(length),
+            _ => (0, length),
+        };
         return true;
+    }
+
+    /// <summary>
+    /// DTS-HD burst: 10-byte start code (01 00 00 00 00 00 00 00 FE FE), big-endian frame size, frame, padding.
+    /// </summary>
+    (int, int) DtsHdFrame(int length) {
+        int size = length < 12 ? 0 : payload[10] << 8 | payload[11];
+        return size > 0 && payload[9] == 0xFE && 12 + size <= length ? (12, 12 + size) : (0, 0);
     }
 
     /// <summary>

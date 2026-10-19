@@ -29,6 +29,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: true # dtsx-objects/DTSX_decoder
 
       - name: Version
         shell: pwsh
@@ -50,6 +52,11 @@ jobs:
         working-directory: thd-objects
         run: cargo build --release --locked
 
+      - name: Build dtsx-objects (DTS helper)
+        run: |
+          cmake -S dtsx-objects -B dtsx-objects/build
+          cmake --build dtsx-objects/build --config Release --parallel
+
       - name: Cache NuGet packages
         uses: actions/cache@v6
         with:
@@ -69,6 +76,7 @@ jobs:
           Get-Content selftest.txt
           if ($p.ExitCode -ne 0) { throw "selftest failed ($($p.ExitCode))" }
           if (-not (Test-Path publish/thd-objects.exe)) { throw 'thd-objects.exe missing from publish' }
+          if (-not (Test-Path publish/dtsx-objects.exe)) { throw 'dtsx-objects.exe missing from publish' }
 
       # TEMPORARY: compare installer compression settings (time and size), then pick one
       - name: Compression probe

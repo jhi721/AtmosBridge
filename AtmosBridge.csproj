@@ -18,6 +18,10 @@
     <!-- TrueHD helper, built with "cargo build -r" in thd-objects -->
     <None Include="thd-objects/target/release/thd-objects.exe" Link="thd-objects.exe" CopyToOutputDirectory="PreserveNewest"
           CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <!-- DTS helper, built with CMake in dtsx-objects (see its CMakeLists.txt); optional for local builds, CI checks it -->
+    <None Include="dtsx-objects/build/Release/dtsx-objects.exe" Condition="Exists('dtsx-objects/build/Release/dtsx-objects.exe')"
+          Link="dtsx-objects.exe" CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
   </ItemGroup>
 
 </Project>

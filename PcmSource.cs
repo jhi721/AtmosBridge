@@ -21,6 +21,11 @@ sealed class WaveFormat {
     public bool IsHbr => Channels == 8 && SampleRate == 192000 && Bits == 16 && !Float;
 
     /// <summary>
+    /// Plain DTS passthrough (no DTS-HD) is S16 2ch at 44.1/48 kHz, the same header as stereo PCM.
+    /// </summary>
+    public bool MaybeDts => Channels == 2 && SampleRate is 44100 or 48000 && Bits == 16 && !Float;
+
+    /// <summary>
     /// Read RIFF/WAVE chunks up to the start of the data chunk.
     /// </summary>
     public static WaveFormat Read(Stream s) {
@@ -51,6 +56,33 @@ sealed class WaveFormat {
 
     public override string ToString() =>
         $"{Channels}ch {SampleRate} Hz {Bits}-bit{(Float ? " float" : "")} mask 0x{ChannelMask:X}";
+}
+
+/// <summary>
+/// Bytes already read (sniffed) followed by the rest of the stream.
+/// </summary>
+sealed class PrefixedStream(byte[] prefix, Stream rest) : Stream {
+    int pos;
+
+    public override int Read(byte[] buffer, int offset, int count) {
+        if (pos == prefix.Length) {
+            return rest.Read(buffer, offset, count);
+        }
+        int n = Math.Min(count, prefix.Length - pos);
+        Buffer.BlockCopy(prefix, pos, buffer, offset, n);
+        pos += n;
+        return n;
+    }
+
+    public override bool CanRead => true;
+    public override bool CanSeek => false;
+    public override bool CanWrite => false;
+    public override long Length => throw new NotSupportedException();
+    public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+    public override void Flush() { }
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+    public override void SetLength(long value) => throw new NotSupportedException();
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 }
 
 static class PcmSource {

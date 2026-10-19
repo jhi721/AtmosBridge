@@ -94,7 +94,10 @@ static class Program {
         new Thread(() => MpvIpc.Run(ipcName, () => running, Log)) { IsBackground = true }.Start();
 
         if (file != null && file.EndsWith(".thd", StringComparison.OrdinalIgnoreCase)) {
-            Pump(TrueHdSource.Read(File.OpenRead(file), blockSize, Log));
+            Pump(HelperSource.Read(HelperSource.TrueHd, File.OpenRead(file), blockSize, Log));
+        } else if (file != null && (file.EndsWith(".dts", StringComparison.OrdinalIgnoreCase)
+            || file.EndsWith(".dtshd", StringComparison.OrdinalIgnoreCase))) {
+            Pump(HelperSource.Read(HelperSource.Dts, File.OpenRead(file), blockSize, Log));
         } else if (file != null) {
             Pump(CavernChunks(OpenFile(file), () => false));
         } else {
@@ -103,16 +106,18 @@ static class Program {
                     PipeOptions.None, 4096, 0);
                 Console.WriteLine($@"Waiting for mpv on \\.\pipe\{pipeName} ...");
                 pipe.WaitForConnection();
-                var input = new BufferedStream(pipe, 16384);
+                Stream input = new BufferedStream(pipe, 16384);
                 try {
                     WaveFormat format = WaveFormat.Read(input);
-                    if (format.IsSpdif) {
-                        Log("mpv connected: E-AC-3 passthrough");
+                    if (format.IsSpdif || format.IsHbr || format.MaybeDts && SniffIec(ref input)) {
                         var iec = new Iec61937Stream(input);
-                        Pump(CavernChunks(OpenEac3(iec), () => iec.EndOfInput));
-                    } else if (format.IsHbr) {
-                        Log("mpv connected: TrueHD passthrough");
-                        Pump(TrueHdSource.Read(new Iec61937Stream(input), blockSize, Log));
+                        string codec = iec.Codec;
+                        Log($"mpv connected: {codec ?? "empty"} passthrough");
+                        switch (codec) {
+                            case "E-AC-3": Pump(CavernChunks(OpenEac3(iec), () => iec.EndOfInput)); break;
+                            case "TrueHD": Pump(HelperSource.Read(HelperSource.TrueHd, iec, blockSize, Log)); break;
+                            case "DTS": Pump(HelperSource.Read(HelperSource.Dts, iec, blockSize, Log)); break;
+                        }
                     } else if (format.SampleRate == sampleRate && format.Bits is 8 or 16 or 32) {
                         Log($"mpv connected: PCM {format}");
                         Pump(PcmSource.Read(input, format, blockSize));
@@ -130,6 +135,22 @@ static class Program {
         running = false;
         renderThread.Join(500);
         return 0;
+    }
+
+    /// <summary>
+    /// Plain DTS passthrough comes as 16-bit stereo like PCM: look for burst syncs after the leading silence (mpv pads
+    /// the start for A/V sync, and it is silence either way) and put the bytes read back in front of the stream.
+    /// </summary>
+    static bool SniffIec(ref Stream input) {
+        byte[] head = new byte[8192]; // >= 1 burst: DTS type III is 2048 samples = 8192 bytes
+        do {
+            if (input.ReadAtLeast(head.AsSpan(0, 4), 4, false) < 4) {
+                return false;
+            }
+        } while (BitConverter.ToUInt32(head) == 0);
+        int n = 4 + input.ReadAtLeast(head.AsSpan(4), head.Length - 4, false);
+        input = new BufferedStream(new PrefixedStream(head[..n], input));
+        return Iec61937Stream.HasSync(head.AsSpan(0, n));
     }
 
     /// <summary>
@@ -222,23 +243,39 @@ static class Program {
     /// </summary>
     static int SelfTest() {
         byte[] frameA = [0x0B, 0x77, 1, 2, 3, 4, 5, 6], frameB = [0x0B, 0x77, 9, 8, 7, 6];
-        var wire = new MemoryStream();
-        wire.Write([0xAA, 0x72]); // junk incl. a partial sync byte
-        foreach (byte[] payload in new[] { frameA, frameB }) {
-            wire.Write([0x72, 0xF8, 0x1F, 0x4E, 21, 0, (byte)payload.Length, 0]);
+        static void Burst(MemoryStream wire, int type, int pd, byte[] payload) {
+            wire.Write([0x72, 0xF8, 0x1F, 0x4E, (byte)type, 0, (byte)pd, (byte)(pd >> 8)]);
             for (int i = 0; i < payload.Length; i += 2) {
                 wire.Write([payload[i + 1], payload[i]]); // spdif words are byte-swapped
             }
             wire.Write(new byte[64]);
         }
+        var wire = new MemoryStream();
+        wire.Write([0xAA, 0x72]); // junk incl. a partial sync byte
+        Burst(wire, 21, frameA.Length, frameA);
+        Burst(wire, 21, frameB.Length, frameB);
         wire.Write([0x72, 0xF8, 0x1F, 0x4E, 0, 0, 4, 0, 0, 0, 0, 0]); // pause burst (type 0) is skipped
         wire.Position = 0;
 
         var iec = new Iec61937Stream(wire);
         byte[] expected = [.. frameA, .. frameB], got = new byte[expected.Length];
-        bool ok = iec.Length == frameA.Length && iec.Read(got, 0, got.Length) == got.Length && got.SequenceEqual(expected)
-            && iec.Read(new byte[1], 0, 1) == 0 && iec.EndOfInput;
+        bool ok = iec.Codec == "E-AC-3" && iec.Length == frameA.Length && iec.Read(got, 0, got.Length) == got.Length
+            && got.SequenceEqual(expected) && iec.Read(new byte[1], 0, 1) == 0 && iec.EndOfInput;
         Console.WriteLine(ok ? "IEC 61937 OK" : "IEC 61937 FAILED: " + Convert.ToHexString(got));
+
+        // DTS type I (Pd in bits) and DTS-HD (start code + frame size, Pd padded past the frame): bare frames come back
+        byte[] core = [0x7F, 0xFE, 0x80, 0x01, 1, 2], hd = [0x64, 0x58, 0x20, 0x25, 3, 4, 5, 6];
+        var dtsWire = new MemoryStream();
+        Burst(dtsWire, 11, core.Length * 8, core);
+        Burst(dtsWire, 17, 24, [1, 0, 0, 0, 0, 0, 0, 0, 0xFE, 0xFE, 0, (byte)hd.Length, .. hd, 0, 0, 0, 0]);
+        bool dtsSync = Iec61937Stream.HasSync(dtsWire.ToArray()) && !Iec61937Stream.HasSync(new byte[64]);
+        dtsWire.Position = 0;
+        var dtsIec = new Iec61937Stream(dtsWire);
+        byte[] dts = new byte[core.Length + hd.Length];
+        bool dtsOk = dtsSync && dtsIec.Codec == "DTS" && dtsIec.Read(dts, 0, dts.Length) == dts.Length
+            && dts.SequenceEqual([.. core, .. hd]) && dtsIec.Read(new byte[1], 0, 1) == 0;
+        Console.WriteLine(dtsOk ? "DTS OK" : "DTS FAILED: " + Convert.ToHexString(dts));
+        ok &= dtsOk;
 
         // TrueHD MAT: codes and zero padding go, access units (length in words, low 12 bits) survive, also split by the middle code
         byte[] mat = new byte[61424];

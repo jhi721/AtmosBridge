@@ -1,0 +1,3 @@
+[submodule "dtsx-objects/DTSX_decoder"]
+	path = dtsx-objects/DTSX_decoder
+	url = https://github.com/almirus/DTSX_decoder

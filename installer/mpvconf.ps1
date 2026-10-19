@@ -10,7 +10,7 @@ $block = @(
     $begin
     '[default]'
     'ao=pcm,wasapi'
-    'audio-spdif=eac3,truehd'
+    'audio-spdif=eac3,truehd,dts-hd'
     'ao-pcm-file=\\.\pipe\atmos'
     'audio-samplerate=48000'
     'input-ipc-server=\\.\pipe\mpv-atmos'
