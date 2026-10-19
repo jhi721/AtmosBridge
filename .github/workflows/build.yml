@@ -29,6 +29,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: true # dtsx-objects/DTSX_decoder
 
       - name: Version
         shell: pwsh
@@ -50,6 +52,11 @@ jobs:
         working-directory: thd-objects
         run: cargo build --release --locked
 
+      - name: Build dtsx-objects (DTS helper)
+        run: |
+          cmake -S dtsx-objects -B dtsx-objects/build
+          cmake --build dtsx-objects/build --config Release --parallel
+
       - name: Cache NuGet packages
         uses: actions/cache@v6
         with:
@@ -69,6 +76,7 @@ jobs:
           Get-Content selftest.txt
           if ($p.ExitCode -ne 0) { throw "selftest failed ($($p.ExitCode))" }
           if (-not (Test-Path publish/thd-objects.exe)) { throw 'thd-objects.exe missing from publish' }
+          if (-not (Test-Path publish/dtsx-objects.exe)) { throw 'dtsx-objects.exe missing from publish' }
 
       # Measured on windows-latest (70 MB payload): lzma2/fast 2 threads 4.6 s / 29 MB, lzma2/max 1 thread 24 s / 24.9 MB,
       # max 2 threads 18 s / 25 MB (4 threads no faster). Releases get the small file, every other build the fast one.

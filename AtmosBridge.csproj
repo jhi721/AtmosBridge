@@ -15,9 +15,17 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- TrueHD helper, built with "cargo build -r" in thd-objects -->
-    <None Include="thd-objects/target/release/thd-objects.exe" Link="thd-objects.exe" CopyToOutputDirectory="PreserveNewest"
-          CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <!-- Decoding helpers, optional for local builds (CI checks both are published):
+         TrueHD built with "cargo build -r" in thd-objects, DTS with CMake in dtsx-objects (see its CMakeLists.txt) -->
+    <None Include="thd-objects/target/release/thd-objects.exe" Condition="Exists('thd-objects/target/release/thd-objects.exe')"
+          Link="thd-objects.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <None Include="dtsx-objects/build/Release/dtsx-objects.exe" Condition="Exists('dtsx-objects/build/Release/dtsx-objects.exe')"
+          Link="dtsx-objects.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
   </ItemGroup>
+
+  <Target Name="WarnMissingHelpers" BeforeTargets="Build">
+    <Warning Condition="!Exists('thd-objects/target/release/thd-objects.exe')" Text="thd-objects.exe not built: TrueHD will not play" />
+    <Warning Condition="!Exists('dtsx-objects/build/Release/dtsx-objects.exe')" Text="dtsx-objects.exe not built: DTS will not play" />
+  </Target>
 
 </Project>

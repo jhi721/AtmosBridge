@@ -11,16 +11,6 @@ sealed class WaveFormat {
     public uint ChannelMask;
 
     /// <summary>
-    /// mpv writes S16 2ch 192 kHz for spdif passthrough; the payload then carries IEC 61937 bursts.
-    /// </summary>
-    public bool IsSpdif => Channels == 2 && SampleRate == 192000 && Bits == 16 && !Float;
-
-    /// <summary>
-    /// TrueHD passthrough (audio-spdif=truehd) is HBR: S16 8ch 192 kHz carrying IEC 61937 MAT bursts.
-    /// </summary>
-    public bool IsHbr => Channels == 8 && SampleRate == 192000 && Bits == 16 && !Float;
-
-    /// <summary>
     /// Read RIFF/WAVE chunks up to the start of the data chunk.
     /// </summary>
     public static WaveFormat Read(Stream s) {
@@ -48,6 +38,12 @@ sealed class WaveFormat {
             }
         }
     }
+
+    /// <summary>
+    /// Whether this can be mpv's passthrough (spdif) output rather than PCM: E-AC-3 and DTS-HD HRA come as S16 2ch
+    /// 192 kHz, TrueHD and DTS-HD MA as S16 8ch 192 kHz (HBR), plain DTS as S16 2ch 44.1/48 kHz.
+    /// </summary>
+    public bool MayCarryBitstream => Bits == 16 && !Float && Channels is 2 or 8;
 
     public override string ToString() =>
         $"{Channels}ch {SampleRate} Hz {Bits}-bit{(Float ? " float" : "")} mask 0x{ChannelMask:X}";

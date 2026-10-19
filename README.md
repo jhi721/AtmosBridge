@@ -12,6 +12,11 @@ strips the MAT framing and pipes the raw TrueHD into `thd-objects.exe`, a small 
 [truehd](https://crates.io/crates/truehd) crate (the library behind truehdd): it decodes the 16-channel object
 presentation and the OAMD positions/gains per access unit, and the bridge sends those as dynamic objects like E-AC-3 JOC.
 Plain (non-Atmos) TrueHD goes the same way, one object per speaker.
+DTS, DTS-HD and DTS:X are passed through too (`audio-spdif=dts-hd`, IEC 61937 DTS bursts). The bridge strips the
+burst framing and pipes the raw DTS into `dtsx-objects.exe`, a C++ helper built on
+[DTSX_decoder](https://github.com/almirus/DTSX_decoder) (git submodule): libdcadec decodes the core / DTS-HD bed,
+DTSX_decoder decodes the DTS:X object waveforms and metadata, removes their fold-down from the bed and pans them
+with its renderer into 7.1.4. The 12 channels go to Windows as one object per speaker.
 Any other codec (AAC, FLAC, ...) arrives as PCM and is sent as one object per speaker position.
 
 ## Install
@@ -47,6 +52,8 @@ seek, then prebuffers again. Without IPC it still plays, but pause/seek leave ~0
 
 ```
 cd thd-objects && cargo build -r && cd ..     # TrueHD helper (Rust >= 1.88), copied next to the exe by the build
+git submodule update --init                   # DTS helper sources (DTSX_decoder)
+cmake -S dtsx-objects -B dtsx-objects/build && cmake --build dtsx-objects/build --config Release   # MSVC
 dotnet build -c Release
 bin\Release\net10.0-windows\AtmosBridge.exe --device {5384faff-9e6b-4060-8de7-b76e2bbdd825}
 ```
@@ -58,7 +65,7 @@ bin\Release\net10.0-windows\AtmosBridge.exe --device {5384faff-9e6b-4060-8de7-b7
 | `--ipc` | `mpv-atmos` | mpv IPC pipe (`input-ipc-server=\\.\pipe\mpv-atmos`) |
 | `--latency` | `0.1` | buffer cushion in seconds |
 | `--log` | console | log file (windowless build) |
-| `--file x.ec3` | | play a file directly (test); `.thd` (raw TrueHD) goes through thd-objects |
+| `--file x.ec3` | | play a file directly (test); `.thd` (raw TrueHD) goes through thd-objects, `.dts` / `.dtshd` through dtsx-objects |
 | `--selftest` | | IEC 61937 / MAT unpacker + resampler checks |
 | `--dump --file x.ec3` | | print every object's position and level once per second (diagnostics) |
 
@@ -70,7 +77,7 @@ off, it retries every 3 s and drops audio meanwhile so mpv doesn't stall.
 
 ```
 ao=pcm,wasapi                 # bridge first, normal WASAPI when the bridge isn't running
-audio-spdif=eac3,truehd
+audio-spdif=eac3,truehd,dts-hd
 ao-pcm-file=\\.\pipe\atmos
 audio-samplerate=48000        # PCM path needs the spatial engine's rate
 input-ipc-server=\\.\pipe\mpv-atmos
@@ -86,10 +93,16 @@ audio-delay=-0.15
 
 - TrueHD: 48 kHz only. 96/192 kHz TrueHD (some music discs) is rejected with a decode error and stays silent; drop
   `truehd` from `audio-spdif` for those files. OAMD is applied per access unit (0.83 ms); `sample_offset` and ramps
-  are ignored, and multi-update-block or ISF-object streams are untested. After a seek the decoder resyncs at the
-  next major sync (a few ms of audio dropped, already discarded by the seek flush).
+  are ignored, and multi-update-block or ISF-object streams are untested. After a seek (seen over IPC) the bridge
+  restarts the helper, which picks up at the next major sync (a few ms of audio dropped, already discarded by the
+  seek flush).
 - TrueHD buffer settles slower than E-AC-3: right after start it sits ~50 ms under `--latency` and the drift
   controller takes a minute or two to fill it, so lip sync is ~50 ms early meanwhile.
+- DTS: 48 kHz only, like TrueHD. DTS:X objects arrive pre-rendered to 7.1.4, not as dynamic objects. DTS-UHD (DTS:X
+  P2, streaming) is not supported: DTSX_decoder handles it only through DTS's own DTSXDecoder.dll, left out here.
+  14-bit DTS (DTS-CD) stays silent. After a seek (seen over IPC) the bridge restarts the helper; without IPC the
+  helper restarts on the first frame it can't decode. DTSX_decoder is experimental and licensed PolyForm
+  Noncommercial 1.0.0; libdcadec is LGPL-2.1.
 - `audio-delay=-0.15` is computed, not measured acoustically; fine-tune by ear.
 - Several mpv instances at once: only the first gets the IPC pipe and the audio pipe.
 - Cavern licence: free, non-commercial use. truehd/truehdd: Apache-2.0, a research implementation of TrueHD/OAMD

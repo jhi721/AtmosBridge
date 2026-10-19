@@ -90,7 +90,7 @@ begin
   Result := DirExists(ExpandConstant('{userappdata}\mpv'));
 end;
 
-// Upgrades: the running bridge (and its thd-objects child) lock the files being replaced
+// Upgrades: the running bridge (and its thd-objects / dtsx-objects child) lock the files being replaced
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   Code: Integer;

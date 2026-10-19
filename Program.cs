@@ -93,26 +93,20 @@ static class Program {
         MpvIpc.PlaybackRestart += () => discarding = false;
         new Thread(() => MpvIpc.Run(ipcName, () => running, Log)) { IsBackground = true }.Start();
 
-        if (file != null && file.EndsWith(".thd", StringComparison.OrdinalIgnoreCase)) {
-            Pump(TrueHdSource.Read(File.OpenRead(file), blockSize, Log));
-        } else if (file != null) {
-            Pump(CavernChunks(OpenFile(file), () => false));
+        if (file != null) {
+            Pump(FileChunks(file));
         } else {
             while (running) {
                 using var pipe = new NamedPipeServerStream(pipeName, PipeDirection.In, 1, PipeTransmissionMode.Byte,
                     PipeOptions.None, 4096, 0);
                 Console.WriteLine($@"Waiting for mpv on \\.\pipe\{pipeName} ...");
                 pipe.WaitForConnection();
-                var input = new BufferedStream(pipe, 16384);
+                Stream input = new BufferedStream(pipe, 16384);
                 try {
                     WaveFormat format = WaveFormat.Read(input);
-                    if (format.IsSpdif) {
-                        Log("mpv connected: E-AC-3 passthrough");
-                        var iec = new Iec61937Stream(input);
-                        Pump(CavernChunks(OpenEac3(iec), () => iec.EndOfInput));
-                    } else if (format.IsHbr) {
-                        Log("mpv connected: TrueHD passthrough");
-                        Pump(TrueHdSource.Read(new Iec61937Stream(input), blockSize, Log));
+                    if (OpenBitstream(format, ref input) is (Codec codec, Stream bitstream)) {
+                        Log($"mpv connected: {codec} passthrough");
+                        Pump(Chunks(codec, bitstream));
                     } else if (format.SampleRate == sampleRate && format.Bits is 8 or 16 or 32) {
                         Log($"mpv connected: PCM {format}");
                         Pump(PcmSource.Read(input, format, blockSize));
@@ -130,6 +124,81 @@ static class Program {
         running = false;
         renderThread.Join(500);
         return 0;
+    }
+
+    /// <summary>
+    /// mpv's passthrough output, if this is one: IEC 61937 bursts, or plain DTS core frames without burst framing. The WAV
+    /// header alone can't tell (plain DTS comes as 48 kHz stereo like PCM), so look past the leading silence (mpv pads
+    /// the start for A/V sync, up to a second is checked) for a sync. Everything read goes back in front of the stream,
+    /// silence included, so PCM plays unchanged.
+    /// </summary>
+    static (Codec codec, Stream bitstream)? OpenBitstream(WaveFormat format, ref Stream input) {
+        if (!format.MayCarryBitstream) {
+            return null;
+        }
+        int frame = format.Channels * 2;
+        var head = new MemoryStream();
+        Span<byte> sample = stackalloc byte[frame];
+        bool sound = false;
+        while (!sound && head.Length < format.SampleRate * frame && input.ReadAtLeast(sample, frame, false) == frame) {
+            head.Write(sample);
+            sound = sample.ContainsAnyExcept((byte)0);
+        }
+        int start = (int)head.Length - frame;
+        if (sound) {
+            byte[] block = new byte[8192]; // >= 1 burst: DTS type III is 2048 samples = 8192 bytes
+            head.Write(block, 0, input.ReadAtLeast(block, block.Length, false));
+        }
+        byte[] read = head.ToArray();
+        input = new PrefixedStream(read, input);
+        if (!sound) {
+            return null;
+        }
+        if (Iec61937Stream.HasSync(read.AsSpan(start))) {
+            var iec = new Iec61937Stream(input);
+            return iec.WaitForCodec() is Codec codec ? (codec, iec) : null;
+        }
+        return Iec61937Stream.HasRawDtsSync(read.AsSpan(start)) ? (Codec.Dts, input) : null;
+    }
+
+    /// <summary>
+    /// Decoder for a passthrough bitstream (IEC-unwrapped, raw DTS or a raw file).
+    /// </summary>
+    static IEnumerable<Chunk> Chunks(Codec codec, Stream bitstream) => codec switch {
+        Codec.Eac3 => CavernChunks(OpenEac3(bitstream), () => bitstream is Iec61937Stream { EndOfInput: true }),
+        Codec.TrueHd => HelperSource.Read(HelperSource.TrueHd, bitstream, blockSize, Log),
+        _ => HelperSource.Read(HelperSource.Dts, bitstream, blockSize, Log),
+    };
+
+    /// <summary>
+    /// --file input: raw TrueHD / DTS go to their helpers, a passthrough capture .wav is unwrapped like the live pipe,
+    /// the rest goes to Cavern.
+    /// </summary>
+    static IEnumerable<Chunk> FileChunks(string path) {
+        switch (Path.GetExtension(path).ToLowerInvariant()) {
+            case ".thd":
+                return Chunks(Codec.TrueHd, File.OpenRead(path));
+            case ".dts" or ".dtshd":
+                return Chunks(Codec.Dts, File.OpenRead(path));
+        }
+        return OpenCapture(path) is (Codec codec, Stream bitstream)
+            ? Chunks(codec, bitstream)
+            : CavernChunks(OpenCavern(path), () => false);
+    }
+
+    /// <summary>
+    /// A capture of mpv's passthrough output (ao=pcm, --ao-pcm-file=x.wav), or null for any other file.
+    /// </summary>
+    static (Codec codec, Stream bitstream)? OpenCapture(string path) {
+        if (!path.EndsWith(".wav", StringComparison.OrdinalIgnoreCase)) {
+            return null;
+        }
+        Stream input = new BufferedStream(File.OpenRead(path));
+        var capture = OpenBitstream(WaveFormat.Read(input), ref input);
+        if (capture == null) {
+            input.Dispose();
+        }
+        return capture;
     }
 
     /// <summary>
@@ -162,20 +231,21 @@ static class Program {
     }
 
     /// <summary>
-    /// --file / --dump input. .ec3 goes through the same decoder setup as live passthrough;
-    /// a spdif .wav (capture of mpv's ao=pcm output, --ao-pcm-file=x.wav) is unwrapped like the live pipe;
-    /// anything else, plain PCM .wav included, goes to Cavern's AudioReader.
+    /// --dump input: Cavern objects, so E-AC-3 captures and whatever Cavern reads.
     /// </summary>
-    static (Renderer, int) OpenFile(string path) {
+    static (Renderer, int) OpenFile(string path) => OpenCapture(path) switch {
+        (Codec.Eac3, Stream bitstream) => OpenEac3(bitstream),
+        (Codec codec, _) => throw new NotSupportedException($"--dump decodes E-AC-3 captures only, this is {codec}"),
+        null => OpenCavern(path),
+    };
+
+    /// <summary>
+    /// .ec3 goes through the same decoder setup as live passthrough; anything else, plain PCM .wav included, goes to
+    /// Cavern's AudioReader.
+    /// </summary>
+    static (Renderer, int) OpenCavern(string path) {
         if (path.EndsWith(".ec3", StringComparison.OrdinalIgnoreCase)) {
             return OpenEac3(File.OpenRead(path));
-        }
-        if (path.EndsWith(".wav", StringComparison.OrdinalIgnoreCase)) {
-            var input = new BufferedStream(File.OpenRead(path));
-            if (WaveFormat.Read(input).IsSpdif) {
-                return OpenEac3(new Iec61937Stream(input));
-            }
-            input.Dispose();
         }
         AudioReader reader = AudioReader.Open(path);
         return (reader.GetRenderer(), reader.SampleRate);
@@ -222,23 +292,54 @@ static class Program {
     /// </summary>
     static int SelfTest() {
         byte[] frameA = [0x0B, 0x77, 1, 2, 3, 4, 5, 6], frameB = [0x0B, 0x77, 9, 8, 7, 6];
-        var wire = new MemoryStream();
-        wire.Write([0xAA, 0x72]); // junk incl. a partial sync byte
-        foreach (byte[] payload in new[] { frameA, frameB }) {
-            wire.Write([0x72, 0xF8, 0x1F, 0x4E, 21, 0, (byte)payload.Length, 0]);
+        static void Burst(MemoryStream wire, int type, int pd, byte[] payload) {
+            wire.Write([0x72, 0xF8, 0x1F, 0x4E, (byte)type, 0, (byte)pd, (byte)(pd >> 8)]);
             for (int i = 0; i < payload.Length; i += 2) {
                 wire.Write([payload[i + 1], payload[i]]); // spdif words are byte-swapped
             }
             wire.Write(new byte[64]);
         }
+        var wire = new MemoryStream();
+        wire.Write([0xAA, 0x72]); // junk incl. a partial sync byte
+        Burst(wire, 21, frameA.Length, frameA);
+        Burst(wire, 21, frameB.Length, frameB);
         wire.Write([0x72, 0xF8, 0x1F, 0x4E, 0, 0, 4, 0, 0, 0, 0, 0]); // pause burst (type 0) is skipped
         wire.Position = 0;
 
         var iec = new Iec61937Stream(wire);
         byte[] expected = [.. frameA, .. frameB], got = new byte[expected.Length];
-        bool ok = iec.Length == frameA.Length && iec.Read(got, 0, got.Length) == got.Length && got.SequenceEqual(expected)
-            && iec.Read(new byte[1], 0, 1) == 0 && iec.EndOfInput;
+        bool ok = iec.WaitForCodec() == Codec.Eac3 && iec.Length == frameA.Length && iec.Read(got, 0, got.Length) == got.Length
+            && got.SequenceEqual(expected) && iec.Read(new byte[1], 0, 1) == 0 && iec.EndOfInput;
         Console.WriteLine(ok ? "IEC 61937 OK" : "IEC 61937 FAILED: " + Convert.ToHexString(got));
+
+        // DTS type I (Pd in bits) and DTS-HD (start code + frame size, Pd padded past the frame): bare frames come back
+        byte[] core = [0x7F, 0xFE, 0x80, 0x01, 1, 2], hd = [0x64, 0x58, 0x20, 0x25, 3, 4, 5, 6];
+        var dtsWire = new MemoryStream();
+        Burst(dtsWire, 11, core.Length * 8, core);
+        Burst(dtsWire, 17, 24, [1, 0, 0, 0, 0, 0, 0, 0, 0xFE, 0xFE, 0, (byte)hd.Length, .. hd, 0, 0, 0, 0]);
+        dtsWire.Position = 0;
+        var dtsIec = new Iec61937Stream(dtsWire);
+        byte[] dts = new byte[core.Length + hd.Length];
+        bool dtsOk = dtsIec.WaitForCodec() == Codec.Dts && dtsIec.Read(dts, 0, dts.Length) == dts.Length
+            && dts.SequenceEqual([.. core, .. hd]) && dtsIec.Read(new byte[1], 0, 1) == 0;
+        Console.WriteLine(dtsOk ? "DTS OK" : "DTS FAILED: " + Convert.ToHexString(dts));
+        ok &= dtsOk;
+
+        // Passthrough detection: bursts only on IEC 60958 frames with a defined type; plain DTS without bursts (core
+        // sync as LE words); PCM, leading silence included, comes back untouched
+        byte[] sync = [0x72, 0xF8, 0x1F, 0x4E];
+        bool syncOk = Iec61937Stream.HasSync(dtsWire.ToArray()) && !Iec61937Stream.HasSync(new byte[64])
+            && !Iec61937Stream.HasSync([0, 0, .. sync, 21, 0, 0, 0]) && !Iec61937Stream.HasSync([.. sync, 0x40, 0])
+            && Iec61937Stream.HasRawDtsSync([0, 0, 0, 0, 0xFE, 0x7F, 0x01, 0x80]) && !Iec61937Stream.HasRawDtsSync(new byte[64]);
+        var stereo = new WaveFormat { Channels = 2, SampleRate = sampleRate, Bits = 16 };
+        byte[] pcm = [.. new byte[4000], 1, 2, 3, 4, .. Enumerable.Repeat((byte)5, 20000)];
+        Stream pcmIn = new MemoryStream(pcm);
+        bool pcmOk = OpenBitstream(stereo, ref pcmIn) == null && new BinaryReader(pcmIn).ReadBytes(pcm.Length + 1).SequenceEqual(pcm);
+        Stream rawIn = new MemoryStream([.. new byte[400], 0xFE, 0x7F, 0x01, 0x80, .. new byte[100]]);
+        bool rawOk = OpenBitstream(stereo, ref rawIn) is (Codec.Dts, _);
+        bool detectOk = syncOk && pcmOk && rawOk;
+        Console.WriteLine(detectOk ? "passthrough detection OK" : $"passthrough detection FAILED: sync {syncOk} pcm {pcmOk} raw DTS {rawOk}");
+        ok &= detectOk;
 
         // TrueHD MAT: codes and zero padding go, access units (length in words, low 12 bits) survive, also split by the middle code
         byte[] mat = new byte[61424];
