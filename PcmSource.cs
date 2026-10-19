@@ -11,21 +11,6 @@ sealed class WaveFormat {
     public uint ChannelMask;
 
     /// <summary>
-    /// mpv writes S16 2ch 192 kHz for spdif passthrough; the payload then carries IEC 61937 bursts.
-    /// </summary>
-    public bool IsSpdif => Channels == 2 && SampleRate == 192000 && Bits == 16 && !Float;
-
-    /// <summary>
-    /// TrueHD passthrough (audio-spdif=truehd) is HBR: S16 8ch 192 kHz carrying IEC 61937 MAT bursts.
-    /// </summary>
-    public bool IsHbr => Channels == 8 && SampleRate == 192000 && Bits == 16 && !Float;
-
-    /// <summary>
-    /// Plain DTS passthrough (no DTS-HD) is S16 2ch at 44.1/48 kHz, the same header as stereo PCM.
-    /// </summary>
-    public bool MaybeDts => Channels == 2 && SampleRate is 44100 or 48000 && Bits == 16 && !Float;
-
-    /// <summary>
     /// Read RIFF/WAVE chunks up to the start of the data chunk.
     /// </summary>
     public static WaveFormat Read(Stream s) {
@@ -64,15 +49,20 @@ sealed class WaveFormat {
 sealed class PrefixedStream(byte[] prefix, Stream rest) : Stream {
     int pos;
 
-    public override int Read(byte[] buffer, int offset, int count) {
+    public override int Read(Span<byte> buffer) {
         if (pos == prefix.Length) {
-            return rest.Read(buffer, offset, count);
+            return rest.Read(buffer);
         }
-        int n = Math.Min(count, prefix.Length - pos);
-        Buffer.BlockCopy(prefix, pos, buffer, offset, n);
+        int n = Math.Min(buffer.Length, prefix.Length - pos);
+        prefix.AsSpan(pos, n).CopyTo(buffer);
         pos += n;
         return n;
     }
+
+    public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+
+    // Iec61937Stream scans for syncs byte by byte; the rest is buffered already
+    public override int ReadByte() => pos < prefix.Length ? prefix[pos++] : rest.ReadByte();
 
     public override bool CanRead => true;
     public override bool CanSeek => false;

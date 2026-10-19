@@ -14,8 +14,14 @@ sealed class Iec61937Stream(Stream input) : Stream {
     int auLeft; // bytes of the current TrueHD access unit still to copy (MAT zero-pads between them)
 
     byte[] payload = [];
-    int payloadPos, payloadLen, dataType;
+    int payloadPos, payloadLen;
+    string codec;
     readonly byte[] header = new byte[4];
+
+    /// <summary>
+    /// Pa/Pb burst sync (F872 4E1F) as LE words.
+    /// </summary>
+    static ReadOnlySpan<byte> Sync => [0x72, 0xF8, 0x1F, 0x4E];
 
     /// <summary>
     /// Codec of the first data burst ("E-AC-3", "TrueHD", "DTS"), null if the input ends before one. Blocks until then.
@@ -23,27 +29,15 @@ sealed class Iec61937Stream(Stream input) : Stream {
     public string Codec {
         get {
             _ = Length;
-            return dataType switch {
-                typeEac3 => "E-AC-3",
-                typeTrueHd => "TrueHD",
-                typeDtsHd or (>= typeDts1 and <= typeDts3) => "DTS",
-                _ => null,
-            };
+            return codec;
         }
     }
 
     /// <summary>
-    /// Whether a block of 16-bit words contains a burst sync (Pa/Pb). mpv sends plain DTS as 48 kHz stereo,
-    /// which the WAV header doesn't tell apart from PCM.
+    /// Whether a block contains a burst sync. The WAV header doesn't tell passthrough from PCM (plain DTS comes as
+    /// 48 kHz stereo).
     /// </summary>
-    public static bool HasSync(ReadOnlySpan<byte> data) {
-        for (int i = 0; i + 4 <= data.Length; i += 2) {
-            if (data[i] == 0x72 && data[i + 1] == 0xF8 && data[i + 2] == 0x1F && data[i + 3] == 0x4E) {
-                return true;
-            }
-        }
-        return false;
-    }
+    public static bool HasSync(ReadOnlySpan<byte> data) => data.IndexOf(Sync) >= 0;
 
     /// <summary>
     /// The pipe closed (mpv closed the AO): the decoder should stop.
@@ -69,27 +63,29 @@ sealed class Iec61937Stream(Stream input) : Stream {
     }
 
     /// <summary>
-    /// Scan to the next Pa/Pb sync (F872 4E1F), read Pc/Pd and the byte-swapped payload.
+    /// Scan to the next Pa/Pb sync, read Pc/Pd and the byte-swapped payload.
     /// </summary>
     bool NextBurst() {
-        int state = 0; // matched bytes of 72 F8 1F 4E
-        ReadOnlySpan<byte> sync = [0x72, 0xF8, 0x1F, 0x4E];
+        int state = 0; // matched bytes of the sync
         while (state < 4) {
             int b = input.ReadByte();
             if (b < 0) {
                 return false;
             }
-            state = b == sync[state] ? state + 1 : (b == sync[0] ? 1 : 0);
+            state = b == Sync[state] ? state + 1 : (b == Sync[0] ? 1 : 0);
         }
         if (!ReadExact(header, 4)) {
             return false;
         }
         int type = header[0] & 0x1F;
-        bool dts = type is >= typeDts1 and <= typeDts3;
-        int length = header[2] | header[3] << 8; // E-AC-3, TrueHD, DTS-HD: Pd is in bytes
-        if (dts) {
-            length >>= 3; // DTS type I-III: in bits
-        }
+        bool dtsCore = type is >= typeDts1 and <= typeDts3;
+        int length = (header[2] | header[3] << 8) >> (dtsCore ? 3 : 0); // DTS type I-III: Pd in bits, others bytes
+        string burstCodec = type switch {
+            typeEac3 => "E-AC-3",
+            typeTrueHd when length == 61424 => "TrueHD",
+            typeDtsHd => "DTS",
+            _ => dtsCore ? "DTS" : null, // pause bursts, AC-3 etc.: skipped
+        };
         int padded = (length + 1) & ~1;
         if (payload.Length < padded) {
             payload = new byte[padded];
@@ -97,13 +93,13 @@ sealed class Iec61937Stream(Stream input) : Stream {
         if (!ReadExact(payload, padded)) {
             return false;
         }
-        if (type != typeEac3 && type != typeDtsHd && !dts && (type != typeTrueHd || length != 61424)) {
-            payloadPos = payloadLen = 0; // pause bursts, AC-3 etc.: skip
+        if (burstCodec == null) {
+            payloadPos = payloadLen = 0;
             return true;
         }
         Span<ushort> words = MemoryMarshal.Cast<byte, ushort>(payload.AsSpan(0, padded));
         BinaryPrimitives.ReverseEndianness(words, words);
-        dataType = type;
+        codec ??= burstCodec;
         (payloadPos, payloadLen) = type switch {
             typeTrueHd => (0, UnwrapMat(length)),
             typeDtsHd => DtsHdFrame(length),

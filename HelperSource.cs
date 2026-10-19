@@ -23,12 +23,13 @@ static class HelperSource {
         };
         helper.BeginErrorReadLine();
         new Thread(() => {
-            // Small reads: the IEC unwrapper blocks until a request is full, which would add latency
+            // The IEC unwrapper blocks until a request is full, so ask for at most what is left of the current burst
+            // (its Length; a file's is the whole file): low-rate DTS would otherwise arrive several frames late
             byte[] buffer = new byte[4096];
             Stream stdin = helper.StandardInput.BaseStream;
             try {
                 int n;
-                while ((n = input.Read(buffer, 0, buffer.Length)) > 0) {
+                while ((n = input.Read(buffer, 0, (int)Math.Min(buffer.Length, input.Length))) > 0) {
                     stdin.Write(buffer, 0, n);
                     stdin.Flush();
                 }

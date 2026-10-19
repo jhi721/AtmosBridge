@@ -15,13 +15,12 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- TrueHD helper, built with "cargo build -r" in thd-objects -->
-    <None Include="thd-objects/target/release/thd-objects.exe" Link="thd-objects.exe" CopyToOutputDirectory="PreserveNewest"
-          CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
-    <!-- DTS helper, built with CMake in dtsx-objects (see its CMakeLists.txt); optional for local builds, CI checks it -->
+    <!-- Decoding helpers, optional for local builds (CI checks both are published):
+         TrueHD built with "cargo build -r" in thd-objects, DTS with CMake in dtsx-objects (see its CMakeLists.txt) -->
+    <None Include="thd-objects/target/release/thd-objects.exe" Condition="Exists('thd-objects/target/release/thd-objects.exe')"
+          Link="thd-objects.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
     <None Include="dtsx-objects/build/Release/dtsx-objects.exe" Condition="Exists('dtsx-objects/build/Release/dtsx-objects.exe')"
-          Link="dtsx-objects.exe" CopyToOutputDirectory="PreserveNewest"
-          CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+          Link="dtsx-objects.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
   </ItemGroup>
 
 </Project>

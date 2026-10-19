@@ -93,13 +93,8 @@ static class Program {
         MpvIpc.PlaybackRestart += () => discarding = false;
         new Thread(() => MpvIpc.Run(ipcName, () => running, Log)) { IsBackground = true }.Start();
 
-        if (file != null && file.EndsWith(".thd", StringComparison.OrdinalIgnoreCase)) {
-            Pump(HelperSource.Read(HelperSource.TrueHd, File.OpenRead(file), blockSize, Log));
-        } else if (file != null && (file.EndsWith(".dts", StringComparison.OrdinalIgnoreCase)
-            || file.EndsWith(".dtshd", StringComparison.OrdinalIgnoreCase))) {
-            Pump(HelperSource.Read(HelperSource.Dts, File.OpenRead(file), blockSize, Log));
-        } else if (file != null) {
-            Pump(CavernChunks(OpenFile(file), () => false));
+        if (file != null) {
+            Pump(FileChunks(file));
         } else {
             while (running) {
                 using var pipe = new NamedPipeServerStream(pipeName, PipeDirection.In, 1, PipeTransmissionMode.Byte,
@@ -109,15 +104,9 @@ static class Program {
                 Stream input = new BufferedStream(pipe, 16384);
                 try {
                     WaveFormat format = WaveFormat.Read(input);
-                    if (format.IsSpdif || format.IsHbr || format.MaybeDts && SniffIec(ref input)) {
-                        var iec = new Iec61937Stream(input);
-                        string codec = iec.Codec;
-                        Log($"mpv connected: {codec ?? "empty"} passthrough");
-                        switch (codec) {
-                            case "E-AC-3": Pump(CavernChunks(OpenEac3(iec), () => iec.EndOfInput)); break;
-                            case "TrueHD": Pump(HelperSource.Read(HelperSource.TrueHd, iec, blockSize, Log)); break;
-                            case "DTS": Pump(HelperSource.Read(HelperSource.Dts, iec, blockSize, Log)); break;
-                        }
+                    if (OpenIec(format, ref input) is Iec61937Stream iec) {
+                        Log($"mpv connected: {iec.Codec ?? "empty"} passthrough");
+                        Pump(IecChunks(iec));
                     } else if (format.SampleRate == sampleRate && format.Bits is 8 or 16 or 32) {
                         Log($"mpv connected: PCM {format}");
                         Pump(PcmSource.Read(input, format, blockSize));
@@ -138,19 +127,55 @@ static class Program {
     }
 
     /// <summary>
-    /// Plain DTS passthrough comes as 16-bit stereo like PCM: look for burst syncs after the leading silence (mpv pads
-    /// the start for A/V sync, and it is silence either way) and put the bytes read back in front of the stream.
+    /// IEC 61937 passthrough is 16-bit stereo or 8ch with burst syncs; the WAV header alone can't tell (plain DTS comes
+    /// as 48 kHz stereo like PCM). Look for a sync after the leading silence (mpv pads the start for A/V sync; silence
+    /// either way, so it is dropped) and put the bytes read back in front of the stream.
     /// </summary>
-    static bool SniffIec(ref Stream input) {
+    static Iec61937Stream OpenIec(WaveFormat format, ref Stream input) {
+        if (format.Bits != 16 || format.Float || format.Channels is not (2 or 8)) {
+            return null;
+        }
+        int frame = format.Channels * 2;
         byte[] head = new byte[8192]; // >= 1 burst: DTS type III is 2048 samples = 8192 bytes
         do {
-            if (input.ReadAtLeast(head.AsSpan(0, 4), 4, false) < 4) {
-                return false;
+            if (input.ReadAtLeast(head.AsSpan(0, frame), frame, false) < frame) {
+                return null;
             }
-        } while (BitConverter.ToUInt32(head) == 0);
-        int n = 4 + input.ReadAtLeast(head.AsSpan(4), head.Length - 4, false);
-        input = new BufferedStream(new PrefixedStream(head[..n], input));
-        return Iec61937Stream.HasSync(head.AsSpan(0, n));
+        } while (!head.AsSpan(0, frame).ContainsAnyExcept((byte)0));
+        int n = frame + input.ReadAtLeast(head.AsSpan(frame), head.Length - frame, false);
+        input = new PrefixedStream(head[..n], input);
+        return Iec61937Stream.HasSync(head.AsSpan(0, n)) ? new Iec61937Stream(input) : null;
+    }
+
+    /// <summary>
+    /// Decode passthrough by the codec of its first burst.
+    /// </summary>
+    static IEnumerable<Chunk> IecChunks(Iec61937Stream iec) => iec.Codec switch {
+        "E-AC-3" => CavernChunks(OpenEac3(iec), () => iec.EndOfInput),
+        "TrueHD" => HelperSource.Read(HelperSource.TrueHd, iec, blockSize, Log),
+        "DTS" => HelperSource.Read(HelperSource.Dts, iec, blockSize, Log),
+        _ => [],
+    };
+
+    /// <summary>
+    /// --file input: raw TrueHD / DTS go to their helpers, a passthrough .wav (capture of mpv's ao=pcm output,
+    /// --ao-pcm-file=x.wav) is unwrapped like the live pipe, the rest goes to Cavern.
+    /// </summary>
+    static IEnumerable<Chunk> FileChunks(string path) {
+        switch (Path.GetExtension(path).ToLowerInvariant()) {
+            case ".thd":
+                return HelperSource.Read(HelperSource.TrueHd, File.OpenRead(path), blockSize, Log);
+            case ".dts" or ".dtshd":
+                return HelperSource.Read(HelperSource.Dts, File.OpenRead(path), blockSize, Log);
+            case ".wav":
+                Stream input = new BufferedStream(File.OpenRead(path));
+                if (OpenIec(WaveFormat.Read(input), ref input) is Iec61937Stream iec) {
+                    return IecChunks(iec);
+                }
+                input.Dispose();
+                break;
+        }
+        return CavernChunks(OpenFile(path), () => false);
     }
 
     /// <summary>
@@ -183,8 +208,8 @@ static class Program {
     }
 
     /// <summary>
-    /// --file / --dump input. .ec3 goes through the same decoder setup as live passthrough;
-    /// a spdif .wav (capture of mpv's ao=pcm output, --ao-pcm-file=x.wav) is unwrapped like the live pipe;
+    /// Cavern input for --file / --dump. .ec3 goes through the same decoder setup as live passthrough;
+    /// an E-AC-3 passthrough .wav is unwrapped like the live pipe;
     /// anything else, plain PCM .wav included, goes to Cavern's AudioReader.
     /// </summary>
     static (Renderer, int) OpenFile(string path) {
@@ -192,9 +217,9 @@ static class Program {
             return OpenEac3(File.OpenRead(path));
         }
         if (path.EndsWith(".wav", StringComparison.OrdinalIgnoreCase)) {
-            var input = new BufferedStream(File.OpenRead(path));
-            if (WaveFormat.Read(input).IsSpdif) {
-                return OpenEac3(new Iec61937Stream(input));
+            Stream input = new BufferedStream(File.OpenRead(path));
+            if (OpenIec(WaveFormat.Read(input), ref input) is { Codec: "E-AC-3" } iec) {
+                return OpenEac3(iec);
             }
             input.Dispose();
         }

@@ -17,6 +17,7 @@
 #include <io.h>
 
 #include <cstdio>
+#include <cstring>
 
 namespace dtsx_decode {
 
@@ -86,10 +87,7 @@ public:
                 throw std::runtime_error("frame has no decodable audio (object: " + objects_.last_error()
                                          + "; bed: " + bed_.last_error() + ")");
             }
-            decoded.bed_channels = std::move(decoded_bed.channels);
-            decoded.bed_speaker_activity_mask = decoded_bed.speaker_activity_mask;
-            decoded.sample_rate = decoded_bed.sample_rate;
-            decoded.samples_per_channel = decoded_bed.samples_per_channel;
+            take_bed(decoded, std::move(decoded_bed));
         }
         rate = decoded.sample_rate;
 
@@ -126,15 +124,21 @@ public:
     }
 
 private:
+    // libdcadec's bed as the frame's bed (the object decoder had none)
+    static void take_bed(DecodedObjectAudioFrame& decoded, DcaDecodedBed bed) {
+        decoded.bed_channels = std::move(bed.channels);
+        decoded.bed_speaker_activity_mask = bed.speaker_activity_mask;
+        decoded.sample_rate = bed.sample_rate;
+        decoded.samples_per_channel = bed.samples_per_channel;
+    }
+
     bool play_core(Planar& out, std::uint32_t& rate) {
-        const DcaDecodedBed& core = bed_.decoded_core();
-        if (core.channels.empty()) {
+        if (bed_.decoded_core().channels.empty()) {
             return false;
         }
         DecodedObjectAudioFrame decoded;
-        decoded.bed_channels = core.channels;
-        decoded.bed_speaker_activity_mask = core.speaker_activity_mask;
-        rate = core.sample_rate;
+        take_bed(decoded, bed_.decoded_core());
+        rate = decoded.sample_rate;
         return map_xll_bed_to_layout(decoded, layout_, out);
     }
 
@@ -150,10 +154,11 @@ void write_frame(const Planar& pcm, std::uint32_t rate, std::vector<char>& out) 
         return;
     }
     const std::size_t samples = pcm.front().size();
-    out.clear();
-    const auto put = [&out](const auto& value) {
-        const char* bytes = reinterpret_cast<const char*>(&value);
-        out.insert(out.end(), bytes, bytes + sizeof value);
+    out.resize(8U + kChannels * 17U + samples * kChannels * 4U);
+    char* cursor = out.data();
+    const auto put = [&cursor](const auto& value) {
+        std::memcpy(cursor, &value, sizeof value);
+        cursor += sizeof value;
     };
     put(static_cast<std::uint16_t>(kChannels));
     put(static_cast<std::uint16_t>(samples));
@@ -171,7 +176,6 @@ void write_frame(const Planar& pcm, std::uint32_t rate, std::vector<char>& out) 
         }
     }
     std::fwrite(out.data(), 1, out.size(), stdout);
-    std::fflush(stdout);
 }
 
 } // namespace
@@ -181,6 +185,7 @@ int main() {
     using namespace dtsx_decode;
     _setmode(_fileno(stdin), _O_BINARY);
     _setmode(_fileno(stdout), _O_BINARY);
+    std::setvbuf(stdout, nullptr, _IONBF, 0); // each frame goes out in one write, no flush needed
     auto decoder = std::make_unique<Decoder>();
     dtsx::FrameAssembler assembler;
     std::vector<unsigned char> input(1 << 16);
