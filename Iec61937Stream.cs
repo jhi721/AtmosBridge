@@ -4,6 +4,11 @@ using System.Runtime.InteropServices;
 namespace AtmosBridge;
 
 /// <summary>
+/// Passthrough bitstreams the bridge decodes.
+/// </summary>
+enum Codec { Eac3, TrueHd, Dts }
+
+/// <summary>
 /// Unwraps IEC 61937 bursts (as written by mpv's spdif passthrough, 16-bit LE words) into the raw bitstream:
 /// E-AC-3 for Cavern, TrueHD (MAT frames) for thd-objects, DTS (core, DTS-HD, DTS:X) for dtsx-objects.
 /// </summary>
@@ -15,7 +20,7 @@ sealed class Iec61937Stream(Stream input) : Stream {
 
     byte[] payload = [];
     int payloadPos, payloadLen;
-    string codec;
+    Codec? codec;
     readonly byte[] header = new byte[4];
 
     /// <summary>
@@ -24,20 +29,40 @@ sealed class Iec61937Stream(Stream input) : Stream {
     static ReadOnlySpan<byte> Sync => [0x72, 0xF8, 0x1F, 0x4E];
 
     /// <summary>
-    /// Codec of the first data burst ("E-AC-3", "TrueHD", "DTS"), null if the input ends before one. Blocks until then.
+    /// Codec of the first data burst, null if the input ends before one. Blocks until then.
     /// </summary>
-    public string Codec {
-        get {
-            _ = Length;
-            return codec;
-        }
+    public Codec? WaitForCodec() {
+        _ = Length;
+        return codec;
     }
 
     /// <summary>
-    /// Whether a block contains a burst sync. The WAV header doesn't tell passthrough from PCM (plain DTS comes as
-    /// 48 kHz stereo).
+    /// Whether a block (starting on a sample frame) holds a burst: a sync on a 4-byte IEC 60958 frame boundary followed by
+    /// a defined data type (up to 22, MAT). The WAV header doesn't tell passthrough from PCM (plain DTS comes as 48 kHz
+    /// stereo). Codecs the bridge doesn't decode (AC-3, AAC, ...) still count: their bursts are skipped, i.e. silence.
     /// </summary>
-    public static bool HasSync(ReadOnlySpan<byte> data) => data.IndexOf(Sync) >= 0;
+    public static bool HasSync(ReadOnlySpan<byte> data) {
+        for (int i = 0; i + 5 <= data.Length; i += 4) {
+            if (data.Slice(i, 4).SequenceEqual(Sync) && (data[i + 4] & 0x7F) <= typeTrueHd) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Whether a block holds a DTS core sync without burst framing: ffmpeg's spdif muxer drops Pa/Pb when the core frame
+    /// fills the whole burst period (DTS-CD style streams). 16-bit sync as LE words, or 14-bit packing either way round
+    /// (same sync words as DTSX_decoder's frame_sync.cpp).
+    /// </summary>
+    public static bool HasRawDtsSync(ReadOnlySpan<byte> data) {
+        for (int i = 0; i + 4 <= data.Length; i += 4) {
+            if (BinaryPrimitives.ReadUInt32BigEndian(data[i..]) is 0xFE7F0180 or 0xFF1F00E8 or 0x1FFFE800) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     /// <summary>
     /// The pipe closed (mpv closed the AO): the decoder should stop.
@@ -80,12 +105,6 @@ sealed class Iec61937Stream(Stream input) : Stream {
         int type = header[0] & 0x1F;
         bool dtsCore = type is >= typeDts1 and <= typeDts3;
         int length = (header[2] | header[3] << 8) >> (dtsCore ? 3 : 0); // DTS type I-III: Pd in bits, others bytes
-        string burstCodec = type switch {
-            typeEac3 => "E-AC-3",
-            typeTrueHd when length == 61424 => "TrueHD",
-            typeDtsHd => "DTS",
-            _ => dtsCore ? "DTS" : null, // pause bursts, AC-3 etc.: skipped
-        };
         int padded = (length + 1) & ~1;
         if (payload.Length < padded) {
             payload = new byte[padded];
@@ -93,27 +112,26 @@ sealed class Iec61937Stream(Stream input) : Stream {
         if (!ReadExact(payload, padded)) {
             return false;
         }
-        if (burstCodec == null) {
-            payloadPos = payloadLen = 0;
-            return true;
-        }
         Span<ushort> words = MemoryMarshal.Cast<byte, ushort>(payload.AsSpan(0, padded));
         BinaryPrimitives.ReverseEndianness(words, words);
-        codec ??= burstCodec;
-        (payloadPos, payloadLen) = type switch {
-            typeTrueHd => (0, UnwrapMat(length)),
+        (Codec? burst, payloadPos, payloadLen) = type switch {
+            typeEac3 => (Codec.Eac3, 0, length),
+            typeTrueHd when length == 61424 => (Codec.TrueHd, 0, UnwrapMat(length)),
             typeDtsHd => DtsHdFrame(length),
-            _ => (0, length),
+            _ when dtsCore => (Codec.Dts, 0, length),
+            _ => (null, 0, 0), // pause bursts, AC-3 etc.: skipped
         };
+        // ponytail: the first burst fixes the codec; mpv reopens the AO (a new pipe connection) when it changes
+        codec ??= burst;
         return true;
     }
 
     /// <summary>
     /// DTS-HD burst: 10-byte start code (01 00 00 00 00 00 00 00 FE FE), big-endian frame size, frame, padding.
     /// </summary>
-    (int, int) DtsHdFrame(int length) {
+    (Codec?, int, int) DtsHdFrame(int length) {
         int size = length < 12 ? 0 : payload[10] << 8 | payload[11];
-        return size > 0 && payload[9] == 0xFE && 12 + size <= length ? (12, 12 + size) : (0, 0);
+        return size > 0 && payload[9] == 0xFE && 12 + size <= length ? (Codec.Dts, 12, 12 + size) : (null, 0, 0);
     }
 
     /// <summary>
@@ -151,6 +169,38 @@ sealed class Iec61937Stream(Stream input) : Stream {
             return payloadLen - payloadPos;
         }
     }
+    public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+    public override void Flush() { }
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+    public override void SetLength(long value) => throw new NotSupportedException();
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+}
+
+/// <summary>
+/// Bytes already read (sniffed) followed by the rest of the stream.
+/// </summary>
+sealed class PrefixedStream(byte[] prefix, Stream rest) : Stream {
+    int pos;
+
+    public override int Read(Span<byte> buffer) {
+        if (pos == prefix.Length) {
+            return rest.Read(buffer);
+        }
+        int n = Math.Min(buffer.Length, prefix.Length - pos);
+        prefix.AsSpan(pos, n).CopyTo(buffer);
+        pos += n;
+        return n;
+    }
+
+    public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+
+    // Iec61937Stream scans for syncs byte by byte; the rest is buffered already
+    public override int ReadByte() => pos < prefix.Length ? prefix[pos++] : rest.ReadByte();
+
+    public override bool CanRead => true;
+    public override bool CanSeek => false;
+    public override bool CanWrite => false;
+    public override long Length => throw new NotSupportedException();
     public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
     public override void Flush() { }
     public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();

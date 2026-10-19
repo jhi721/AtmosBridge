@@ -93,14 +93,16 @@ audio-delay=-0.15
 
 - TrueHD: 48 kHz only. 96/192 kHz TrueHD (some music discs) is rejected with a decode error and stays silent; drop
   `truehd` from `audio-spdif` for those files. OAMD is applied per access unit (0.83 ms); `sample_offset` and ramps
-  are ignored, and multi-update-block or ISF-object streams are untested. After a seek the decoder resyncs at the
-  next major sync (a few ms of audio dropped, already discarded by the seek flush).
+  are ignored, and multi-update-block or ISF-object streams are untested. After a seek (seen over IPC) the bridge
+  restarts the helper, which picks up at the next major sync (a few ms of audio dropped, already discarded by the
+  seek flush).
 - TrueHD buffer settles slower than E-AC-3: right after start it sits ~50 ms under `--latency` and the drift
   controller takes a minute or two to fill it, so lip sync is ~50 ms early meanwhile.
 - DTS: 48 kHz only, like TrueHD. DTS:X objects arrive pre-rendered to 7.1.4, not as dynamic objects. DTS-UHD (DTS:X
-  P2, streaming) is not supported: DTSX_decoder handles it only through DTS's own DTSXDecoder.dll, left out here. After
-  a seek the helper restarts its decoder (a frame or two of audio dropped). DTSX_decoder is experimental and licensed
-  PolyForm Noncommercial 1.0.0; libdcadec is LGPL-2.1.
+  P2, streaming) is not supported: DTSX_decoder handles it only through DTS's own DTSXDecoder.dll, left out here.
+  14-bit DTS (DTS-CD) stays silent. After a seek (seen over IPC) the bridge restarts the helper; without IPC the
+  helper restarts on the first frame it can't decode. DTSX_decoder is experimental and licensed PolyForm
+  Noncommercial 1.0.0; libdcadec is LGPL-2.1.
 - `audio-delay=-0.15` is computed, not measured acoustically; fine-tune by ear.
 - Several mpv instances at once: only the first gets the IPC pipe and the audio pipe.
 - Cavern licence: free, non-commercial use. truehd/truehdd: Apache-2.0, a research implementation of TrueHD/OAMD

@@ -11,6 +11,8 @@
 // renderer.
 // ponytail: objects reach Windows pre-rendered to 7.1.4, not as dynamic objects; pass ObjectMetadataBlock
 // positions through if the 7.1.4 render proves too coarse.
+// ponytail: including pipeline.cpp ties this file to upstream internals (anonymous-namespace helpers); after a
+// submodule bump rebuild and rerun the DTS:X check. Upgrade path: upstream exports a per-frame render_frame().
 #include "app/pipeline.cpp"
 
 #include <fcntl.h>
@@ -58,9 +60,21 @@ bool is_extension(const dtsx::ElementaryFrame& frame) noexcept {
 class Decoder final {
 public:
     // Core frame: decoded now, played when the next frame shows there is no extension (plain DTS).
-    bool core(const dtsx::ElementaryFrame& frame, Planar& out, std::uint32_t& rate) {
-        if (frame.packing == dtsx::StreamPacking::DtsUhd) {
+    bool core(dtsx::ElementaryFrame& frame, Planar& out, std::uint32_t& rate) {
+        switch (frame.packing) {
+        case dtsx::StreamPacking::DtsUhd:
             throw std::runtime_error("DTS-UHD is not supported");
+        case dtsx::StreamPacking::Core14BitBigEndian:
+        case dtsx::StreamPacking::Core14BitLittleEndian:
+            throw std::runtime_error("14-bit DTS is not supported");
+        case dtsx::StreamPacking::Core16BitLittleEndian: // raw spdif without bursts; libdcadec parses big-endian only
+            for (std::size_t i = 0U; i + 1U < frame.bytes.size(); i += 2U) {
+                std::swap(frame.bytes[i], frame.bytes[i + 1U]);
+            }
+            frame.packing = dtsx::StreamPacking::Core16BitBigEndian;
+            break;
+        default:
+            break;
         }
         const bool played = core_pending_ && play_core(out, rate);
         bed_.remember_core(frame);

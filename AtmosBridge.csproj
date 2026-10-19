@@ -23,4 +23,9 @@
           Link="dtsx-objects.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
   </ItemGroup>
 
+  <Target Name="WarnMissingHelpers" BeforeTargets="Build">
+    <Warning Condition="!Exists('thd-objects/target/release/thd-objects.exe')" Text="thd-objects.exe not built: TrueHD will not play" />
+    <Warning Condition="!Exists('dtsx-objects/build/Release/dtsx-objects.exe')" Text="dtsx-objects.exe not built: DTS will not play" />
+  </Target>
+
 </Project>

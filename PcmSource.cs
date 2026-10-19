@@ -39,40 +39,14 @@ sealed class WaveFormat {
         }
     }
 
+    /// <summary>
+    /// Whether this can be mpv's passthrough (spdif) output rather than PCM: E-AC-3 and DTS-HD HRA come as S16 2ch
+    /// 192 kHz, TrueHD and DTS-HD MA as S16 8ch 192 kHz (HBR), plain DTS as S16 2ch 44.1/48 kHz.
+    /// </summary>
+    public bool MayCarryBitstream => Bits == 16 && !Float && Channels is 2 or 8;
+
     public override string ToString() =>
         $"{Channels}ch {SampleRate} Hz {Bits}-bit{(Float ? " float" : "")} mask 0x{ChannelMask:X}";
-}
-
-/// <summary>
-/// Bytes already read (sniffed) followed by the rest of the stream.
-/// </summary>
-sealed class PrefixedStream(byte[] prefix, Stream rest) : Stream {
-    int pos;
-
-    public override int Read(Span<byte> buffer) {
-        if (pos == prefix.Length) {
-            return rest.Read(buffer);
-        }
-        int n = Math.Min(buffer.Length, prefix.Length - pos);
-        prefix.AsSpan(pos, n).CopyTo(buffer);
-        pos += n;
-        return n;
-    }
-
-    public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
-
-    // Iec61937Stream scans for syncs byte by byte; the rest is buffered already
-    public override int ReadByte() => pos < prefix.Length ? prefix[pos++] : rest.ReadByte();
-
-    public override bool CanRead => true;
-    public override bool CanSeek => false;
-    public override bool CanWrite => false;
-    public override long Length => throw new NotSupportedException();
-    public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
-    public override void Flush() { }
-    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
-    public override void SetLength(long value) => throw new NotSupportedException();
-    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 }
 
 static class PcmSource {
