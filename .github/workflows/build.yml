@@ -4,17 +4,31 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+    paths-ignore: ['**.md', '.gitignore']
   pull_request:
+    paths-ignore: ['**.md', '.gitignore']
   workflow_dispatch:
+
+# A newer push to the same branch makes the running build pointless; never cancel tag (release) builds
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
   contents: write # release upload on tags
 
+env:
+  DOTNET_NOLOGO: 1
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  NUGET_PACKAGES: D:\nuget # D: is the runner's fast local disk
+
 jobs:
   build:
+    # The image already has the .NET 10 SDK (global.json), Rust and Inno Setup: nothing to install
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Version
         shell: pwsh
@@ -22,18 +36,25 @@ jobs:
           $v = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME.Substring(1) } else { "0.0.$env:GITHUB_RUN_NUMBER" }
           "VERSION=$v" >> $env:GITHUB_ENV
 
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # thd-objects changes rarely and a cold build takes ~30 min on the runner (the truehd crate itself, not LTO),
+      # so cache the finished exe by its sources instead of caching cargo state by compiler version
+      - name: Cache thd-objects.exe
+        id: thd
+        uses: actions/cache@v6
         with:
-          workspaces: thd-objects
+          path: thd-objects/target/release/thd-objects.exe
+          key: thd-objects-${{ hashFiles('thd-objects/Cargo.toml', 'thd-objects/Cargo.lock', 'thd-objects/src/**') }}
 
       - name: Build thd-objects (TrueHD helper)
+        if: steps.thd.outputs.cache-hit != 'true'
         working-directory: thd-objects
         run: cargo build --release --locked
 
-      - uses: actions/setup-dotnet@v4
+      - name: Cache NuGet packages
+        uses: actions/cache@v6
         with:
-          dotnet-version: '10.0.x'
+          path: ${{ env.NUGET_PACKAGES }}
+          key: nuget-${{ hashFiles('AtmosBridge.csproj', 'global.json') }}
 
       - name: Publish AtmosBridge (self-contained, windowless)
         run: >
@@ -49,22 +70,33 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "selftest failed ($($p.ExitCode))" }
           if (-not (Test-Path publish/thd-objects.exe)) { throw 'thd-objects.exe missing from publish' }
 
-      - name: Build installer
+      # TEMPORARY: compare installer compression settings (time and size), then pick one
+      - name: Compression probe
         shell: pwsh
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
-          & $iscc /Qp "/DMyAppVersion=$env:VERSION" installer/AtmosBridge.iss
+          foreach ($c in @('lzma2/max:1', 'lzma2/max:2', 'lzma2/max:4', 'lzma2/normal:2', 'lzma2/fast:2')) {
+            $comp, $threads = $c -split ':'
+            $t = Measure-Command { & $iscc /Q "/DMyAppVersion=probe" "/DCompression=$comp" "/DBlockThreads=$threads" installer/AtmosBridge.iss }
+            $size = (Get-Item out/AtmosBridge-probe-setup.exe).Length / 1MB
+            "{0,-16} {1,5:0.0} s  {2,5:0.0} MB" -f $c, $t.TotalSeconds, $size
+            Remove-Item out/AtmosBridge-probe-setup.exe
+          }
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Qp "/DMyAppVersion=$env:VERSION" installer/AtmosBridge.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: AtmosBridge-${{ env.VERSION }}-setup
           path: out/*.exe
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: out/*.exe
           generate_release_notes: true

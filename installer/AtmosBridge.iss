@@ -4,6 +4,12 @@
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0"
 #endif
+#ifndef Compression
+  #define Compression "lzma2/max"
+#endif
+#ifndef BlockThreads
+  #define BlockThreads "1"
+#endif
 #define Exe "AtmosBridge.exe"
 
 [Setup]
@@ -21,7 +27,8 @@ ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.17763
 OutputDir=..\out
 OutputBaseFilename=AtmosBridge-{#MyAppVersion}-setup
-Compression=lzma2/max
+Compression={#Compression}
+LZMANumBlockThreads={#BlockThreads}
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\{#Exe}
