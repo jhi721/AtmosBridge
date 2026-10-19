@@ -13,7 +13,7 @@ enum Codec { Eac3, TrueHd, Dts }
 /// E-AC-3 for Cavern, TrueHD (MAT frames) for thd-objects, DTS (core, DTS-HD, DTS:X) for dtsx-objects.
 /// </summary>
 sealed class Iec61937Stream(Stream input) : Stream {
-    const int typeDts1 = 11, typeDts3 = 13, typeDtsHd = 17, typeEac3 = 21, typeTrueHd = 22;
+    const int typeAc3 = 1, typeDts1 = 11, typeDts3 = 13, typeDtsHd = 17, typeEac3 = 21, typeTrueHd = 22;
     const int matMiddle = 30708; // MAT frame: 20-byte start code, 12-byte middle code here, 16-byte end code
 
     int auLeft; // bytes of the current TrueHD access unit still to copy (MAT zero-pads between them)
@@ -104,7 +104,7 @@ sealed class Iec61937Stream(Stream input) : Stream {
         }
         int type = header[0] & 0x1F;
         bool dtsCore = type is >= typeDts1 and <= typeDts3;
-        int length = (header[2] | header[3] << 8) >> (dtsCore ? 3 : 0); // DTS type I-III: Pd in bits, others bytes
+        int length = (header[2] | header[3] << 8) >> (dtsCore || type == typeAc3 ? 3 : 0); // AC-3, DTS I-III: Pd in bits
         int padded = (length + 1) & ~1;
         if (payload.Length < padded) {
             payload = new byte[padded];
@@ -115,11 +115,11 @@ sealed class Iec61937Stream(Stream input) : Stream {
         Span<ushort> words = MemoryMarshal.Cast<byte, ushort>(payload.AsSpan(0, padded));
         BinaryPrimitives.ReverseEndianness(words, words);
         (Codec? burst, payloadPos, payloadLen) = type switch {
-            typeEac3 => (Codec.Eac3, 0, length),
+            typeEac3 or typeAc3 => (Codec.Eac3, 0, length), // Cavern's E-AC-3 decoder also takes plain AC-3
             typeTrueHd when length == 61424 => (Codec.TrueHd, 0, UnwrapMat(length)),
             typeDtsHd => DtsHdFrame(length),
             _ when dtsCore => (Codec.Dts, 0, length),
-            _ => (null, 0, 0), // pause bursts, AC-3 etc.: skipped
+            _ => (null, 0, 0), // pause bursts, MPEG etc.: skipped
         };
         // ponytail: the first burst fixes the codec; mpv reopens the AO (a new pipe connection) when it changes
         codec ??= burst;

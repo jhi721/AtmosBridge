@@ -13,12 +13,13 @@ $block = @(
     'audio-spdif=eac3,truehd,dts-hd'
     'ao-pcm-file=\\.\pipe\atmos'
     'audio-samplerate=48000'
+    'audio-channels=auto' # the bridge takes any layout; a fixed list (7.1,5.1,...) would fold heights down
     'input-ipc-server=\\.\pipe\mpv-atmos'
     ''
     '[atmos-bridge-delay]'
     'profile-cond=get("current-ao") == "pcm"'
     'profile-restore=copy'
-    'audio-delay=-0.15'
+    'audio-delay=-0.26' # measured end to end (bridge buffer + Windows spatial + Dolby): +-25 ms on every codec path
     $end
 )
 
@@ -51,3 +52,12 @@ if ($Action -eq 'add') {
 
 # The block opens with [default], so it is safe after any profile section; later options override earlier ones
 [IO.File]::WriteAllText($Path, (($kept -join "`r`n") + "`r`n"), [Text.UTF8Encoding]::new($false))
+
+# Companion script (skips passthrough for 1-2 channel AC-3/E-AC-3), next to mpv.conf in scripts\
+$script = Join-Path (Split-Path $Path) 'scripts\atmosbridge.lua'
+if ($Action -eq 'add') {
+    New-Item -ItemType Directory -Force (Split-Path $script) | Out-Null
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'atmosbridge.lua') $script -Force
+} else {
+    Remove-Item -LiteralPath $script -ErrorAction SilentlyContinue
+}

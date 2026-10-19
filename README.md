@@ -26,8 +26,8 @@ per user (no admin) to `%LOCALAPPDATA%\Programs\AtmosBridge`, self-contained (no
 
 - starts the bridge at sign-in (Startup shortcut, log in `%LOCALAPPDATA%\AtmosBridge\log.txt`);
 - adds the mpv settings below to `%APPDATA%\mpv.net\mpv.conf` and/or `%APPDATA%\mpv\mpv.conf`, between
-  `# >>> AtmosBridge` / `# <<< AtmosBridge` markers (first run keeps a `.bak-atmosbridge` copy). Uninstall removes
-  the block again.
+  `# >>> AtmosBridge` / `# <<< AtmosBridge` markers (first run keeps a `.bak-atmosbridge` copy), and the companion
+  script `scripts\atmosbridge.lua` next to it. Uninstall removes both again.
 
 Enable **Dolby Atmos for Headphones** (Windows sound settings → device → Spatial audio) on the output device first.
 
@@ -48,6 +48,21 @@ reads, so the queue is capped at 2.5× latency and no correction is applied.
 Over mpv's JSON IPC (`input-ipc-server`) the bridge freezes the output on pause and flushes it on
 seek, then prebuffers again. Without IPC it still plays, but pause/seek leave ~0.1 s of stale audio.
 
+End to end (bridge cushion + Windows spatial engine + Dolby renderer) the sound leaves ~0.26 s after mpv writes
+it; `audio-delay=-0.26` lines it up with the picture. Measured with beep test videos and WASAPI loopback: within
+-19 ... +33 ms on the PCM, E-AC-3, TrueHD and DTS paths. Pause reaches the output after ~0.23 s, resume ~0.22 s.
+
+## Fallbacks
+
+- Stereo / mono AC-3 and E-AC-3 (no Atmos possible; Cavern can't decode them): `atmosbridge.lua` drops ac3/eac3
+  from `audio-spdif` for that file before the decoder opens, so mpv decodes it and the bridge gets PCM.
+- Any passthrough stream a decoder still fails on (e.g. after a manual track switch, TrueHD above 48 kHz): the
+  bridge asks mpv over IPC to decode that codec itself for this file (`file-local-options/audio-spdif`), keeps the
+  pipe flowing meanwhile, and takes the PCM on mpv's reconnect.
+- mpv started before the bridge (fell back to WASAPI), or the bridge restarted mid-file: once the bridge has a
+  spatial output and sees mpv over IPC, it sends `ao-reload` so mpv reopens its AO and lands on the pipe again.
+- Bridge not running at all: `ao=pcm,wasapi` plays normally through WASAPI, without the bridge's `audio-delay`.
+
 ## Run
 
 ```
@@ -66,7 +81,7 @@ bin\Release\net10.0-windows\AtmosBridge.exe --device {5384faff-9e6b-4060-8de7-b7
 | `--latency` | `0.1` | buffer cushion in seconds |
 | `--log` | console | log file (windowless build) |
 | `--file x.ec3` | | play a file directly (test); `.thd` (raw TrueHD) goes through thd-objects, `.dts` / `.dtshd` through dtsx-objects |
-| `--selftest` | | IEC 61937 / MAT unpacker + resampler checks |
+| `--selftest` | | IEC 61937 (E-AC-3, AC-3, DTS, MAT) unpacker, passthrough detection, resampler and PCM layout checks |
 | `--dump --file x.ec3` | | print every object's position and level once per second (diagnostics) |
 
 Login startup: `Startup\AtmosBridge.lnk` runs the windowless build in `dist\` (`dotnet publish -c Release -o dist
@@ -80,19 +95,20 @@ ao=pcm,wasapi                 # bridge first, normal WASAPI when the bridge isn'
 audio-spdif=eac3,truehd,dts-hd
 ao-pcm-file=\\.\pipe\atmos
 audio-samplerate=48000        # PCM path needs the spatial engine's rate
+audio-channels=auto           # the bridge takes any layout; a fixed list would fold height channels down
 input-ipc-server=\\.\pipe\mpv-atmos
 
-# bridge latency (--latency + ~50 ms decoder/engine), only when audio goes to the bridge
+# measured end-to-end latency, only when audio goes to the bridge
 [atmos-bridge-delay]
 profile-cond=get("current-ao") == "pcm"
 profile-restore=copy
-audio-delay=-0.15
+audio-delay=-0.26
 ```
 
 ## Limits
 
-- TrueHD: 48 kHz only. 96/192 kHz TrueHD (some music discs) is rejected with a decode error and stays silent; drop
-  `truehd` from `audio-spdif` for those files. OAMD is applied per access unit (0.83 ms); `sample_offset` and ramps
+- TrueHD: 48 kHz only. 96/192 kHz TrueHD (some music discs) fails in the helper; the bridge then has mpv decode it
+  (7.1 core, no objects). OAMD is applied per access unit (0.83 ms); `sample_offset` and ramps
   are ignored, and multi-update-block or ISF-object streams are untested. After a seek (seen over IPC) the bridge
   restarts the helper, which picks up at the next major sync (a few ms of audio dropped, already discarded by the
   seek flush).
@@ -103,7 +119,8 @@ audio-delay=-0.15
   14-bit DTS (DTS-CD) stays silent. After a seek (seen over IPC) the bridge restarts the helper; without IPC the
   helper restarts on the first frame it can't decode. DTSX_decoder is experimental and licensed PolyForm
   Noncommercial 1.0.0; libdcadec is LGPL-2.1.
-- `audio-delay=-0.15` is computed, not measured acoustically; fine-tune by ear.
+- `audio-delay=-0.26` was measured with Dolby Atmos for Headphones; another spatial renderer (Windows Sonic) has
+  its own latency, fine-tune with Ctrl+plus/minus.
 - Several mpv instances at once: only the first gets the IPC pipe and the audio pipe.
 - Cavern licence: free, non-commercial use. truehd/truehdd: Apache-2.0, a research implementation of TrueHD/OAMD
   "not intended for production environments or consumer playback systems" (its README); Dolby patents may apply.

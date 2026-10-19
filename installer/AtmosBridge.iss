@@ -59,6 +59,7 @@ Name: mpv; Description: "{cm:ConfMpv}"; Check: HasMpv; Flags: unchecked
 [Files]
 Source: "..\publish\*"; Excludes: "*.pdb"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 Source: "mpvconf.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "atmosbridge.lua"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

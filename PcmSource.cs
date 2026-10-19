@@ -73,7 +73,7 @@ static class PcmSource {
         for (int ch = 0, bit = 0; ch < f.Channels && bit < 32; bit++) {
             if ((mask & (1u << bit)) != 0) {
                 lfe[ch] = bit == 3;
-                positions[ch] = bit < speakerPositions.Length ? speakerPositions[bit] : default;
+                positions[ch] = speakerPositions[bit < speakerPositions.Length ? bit : 2]; // no standard speaker (22.2 extras): front center
                 ch++;
             }
         }

@@ -40,6 +40,7 @@ static class Program {
     static long buffered;
 
     static volatile bool playing, discarding;
+    static volatile bool outputReady, sessionActive; // spatial stream open / mpv connected on the audio pipe
     static volatile int flushRequests;
     static long discardSince;
     static double ratio = 1;
@@ -91,20 +92,38 @@ static class Program {
             flushRequests++;
         };
         MpvIpc.PlaybackRestart += () => discarding = false;
+        // mpv started before the bridge (fell back to WASAPI) or the bridge restarted mid-file (mpv's pcm AO lost the pipe):
+        // once the bridge can play, ask mpv to reopen its AO, which tries the pipe first
+        MpvIpc.Connected += () => Task.Run(() => {
+            Thread.Sleep(1500); // a normal start connects the audio pipe right after IPC
+            if (outputReady && !sessionActive && MpvIpc.Request("get_property", "current-ao") is System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.String } ao
+                && ao.GetString() is "pcm" or "wasapi" && !sessionActive) {
+                Log($"mpv plays to {ao.GetString()} without the bridge: reopening its audio output");
+                MpvIpc.Request("ao-reload");
+            }
+        });
         new Thread(() => MpvIpc.Run(ipcName, () => running, Log)) { IsBackground = true }.Start();
 
         if (file != null) {
             Pump(FileChunks(file));
         } else {
+            // The next instance exists before the current session ends: mpv reopens its AO within milliseconds (track
+            // change, decode fallback) and falls back to WASAPI if no pipe instance is there to take the reconnect
+            NamedPipeServerStream Listen() => new(pipeName, PipeDirection.In, 2, PipeTransmissionMode.Byte, PipeOptions.None, 4096, 0);
+            NamedPipeServerStream next = Listen();
             while (running) {
-                using var pipe = new NamedPipeServerStream(pipeName, PipeDirection.In, 1, PipeTransmissionMode.Byte,
-                    PipeOptions.None, 4096, 0);
                 Console.WriteLine($@"Waiting for mpv on \\.\pipe\{pipeName} ...");
-                pipe.WaitForConnection();
+                next.WaitForConnection();
+                using var pipe = next;
+                sessionActive = true;
+                next = Listen();
                 Stream input = new BufferedStream(pipe, 16384);
+                Codec? passthrough = null;
+                WaveFormat format = null;
                 try {
-                    WaveFormat format = WaveFormat.Read(input);
+                    format = WaveFormat.Read(input);
                     if (OpenBitstream(format, ref input) is (Codec codec, Stream bitstream)) {
+                        passthrough = codec;
                         Log($"mpv connected: {codec} passthrough");
                         Pump(Chunks(codec, bitstream));
                     } else if (format.SampleRate == sampleRate && format.Bits is 8 or 16 or 32) {
@@ -117,13 +136,47 @@ static class Program {
                     // mpv closed the pipe (stop, track change)
                 } catch (Exception e) {
                     Log("Decode error: " + e);
+                    // A stream our decoders can't take (Cavern: stereo/mono E-AC-3; TrueHD above 48 kHz; ...):
+                    // let mpv decode it instead, it comes back as PCM on the next connection. Keep reading the pipe
+                    // at its real rate meanwhile: mpv's AO thread is blocked writing to it (closing it instead makes
+                    // the untimed AO race through the file), and mpv reopens the AO once the change applies.
+                    if (passthrough is Codec failed) {
+                        string[] codecs = failed switch {
+                            Codec.Eac3 => ["eac3", "ac3"],
+                            Codec.TrueHd => ["truehd"],
+                            _ => ["dts-hd", "dts"],
+                        };
+                        var asked = Task.Run(() => MpvIpc.DecodeInMpv(codecs, Log));
+                        Drain(input, format.SampleRate * format.Channels * 2, () => asked.IsCompleted && !asked.Result);
+                    }
                 }
+                sessionActive = false;
                 Log("mpv disconnected");
             }
         }
         running = false;
         renderThread.Join(500);
         return 0;
+    }
+
+    /// <summary>
+    /// Discard the pipe at its real byte rate until mpv closes it (at most 5 s, or once <paramref name="giveUp"/>).
+    /// </summary>
+    static void Drain(Stream input, int bytesPerSecond, Func<bool> giveUp) {
+        byte[] block = new byte[bytesPerSecond / 100];
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        try {
+            for (long sent = 0; clock.ElapsedMilliseconds < 5000 && !giveUp(); sent += block.Length) {
+                if (input.ReadAtLeast(block, block.Length, false) < block.Length) {
+                    return; // mpv reopened the AO
+                }
+                int ahead = (int)(sent * 1000 / bytesPerSecond - clock.ElapsedMilliseconds);
+                if (ahead > 0) {
+                    Thread.Sleep(ahead);
+                }
+            }
+        } catch (IOException) {
+        }
     }
 
     /// <summary>
@@ -312,6 +365,16 @@ static class Program {
             && got.SequenceEqual(expected) && iec.Read(new byte[1], 0, 1) == 0 && iec.EndOfInput;
         Console.WriteLine(ok ? "IEC 61937 OK" : "IEC 61937 FAILED: " + Convert.ToHexString(got));
 
+        // AC-3 (type 1, Pd in bits) goes to the E-AC-3 decoder like E-AC-3
+        var ac3Wire = new MemoryStream();
+        Burst(ac3Wire, 1, frameA.Length * 8, frameA);
+        ac3Wire.Position = 0;
+        var ac3 = new Iec61937Stream(ac3Wire);
+        byte[] ac3Got = new byte[frameA.Length];
+        bool ac3Ok = ac3.WaitForCodec() == Codec.Eac3 && ac3.Read(ac3Got, 0, ac3Got.Length) == ac3Got.Length && ac3Got.SequenceEqual(frameA);
+        Console.WriteLine(ac3Ok ? "AC-3 OK" : "AC-3 FAILED: " + Convert.ToHexString(ac3Got));
+        ok &= ac3Ok;
+
         // DTS type I (Pd in bits) and DTS-HD (start code + frame size, Pd padded past the frame): bare frames come back
         byte[] core = [0x7F, 0xFE, 0x80, 0x01, 1, 2], hd = [0x64, 0x58, 0x20, 0x25, 3, 4, 5, 6];
         var dtsWire = new MemoryStream();
@@ -375,6 +438,53 @@ static class Program {
         bool stretched = Math.Abs(total - 200_000 * 1.001) <= 2;
         Console.WriteLine($"resampler passthrough {(passthrough ? "OK" : "FAILED")}, drift {(stretched ? "OK" : "FAILED")} ({total})");
         ok &= passthrough && stretched;
+
+        // PCM layouts: every channel keeps its samples and lands at its speaker, by WAVEFORMATEXTENSIBLE bit
+        // (signs of x right / y up / z back; LFE has no position). One mask per layout mpv can send.
+        (int x, int y, int z)[] side = [
+            (-1, 0, -1), (1, 0, -1), (0, 0, -1), (0, 0, 0), (-1, 0, 1), (1, 0, 1), (-1, 0, -1), (1, 0, -1), (0, 0, 1),
+            (-1, 0, 0), (1, 0, 0), (0, 1, 0), (-1, 1, -1), (0, 1, -1), (1, 1, -1), (-1, 1, 1), (0, 1, 1), (1, 1, 1),
+        ];
+        var layouts = new (string name, uint mask)[] {
+            ("mono", 0x4), ("stereo", 0x3), ("2.1", 0xB), ("3.0", 0x7), ("quad", 0x33), ("4.0", 0x107), ("5.0", 0x607),
+            ("5.1", 0x3F), ("5.1(side)", 0x60F), ("6.1", 0x70F), ("7.1", 0x63F), ("7.1(wide)", 0xFF), ("5.1.2", 0x560F),
+            ("5.1.4", 0x2D60F), ("7.1.2", 0x563F), ("7.1.4", 0x2D63F), ("all 18", 0x3FFFF), ("22.2 via mpv", 0xFFFFFF),
+        };
+        var failed = new List<string>();
+        foreach ((string name, uint mask) in layouts) {
+            int channels = System.Numerics.BitOperations.PopCount(mask);
+            var wav = new MemoryStream();
+            var w = new BinaryWriter(wav);
+            w.Write(0x46464952); w.Write(0x7FFFF000); w.Write(0x45564157); // RIFF size WAVE
+            w.Write(0x20746D66); w.Write(40); // fmt, WAVEFORMATEXTENSIBLE
+            w.Write((ushort)0xFFFE); w.Write((ushort)channels); w.Write(48000); w.Write(48000 * channels * 2);
+            w.Write((ushort)(channels * 2)); w.Write((ushort)16); w.Write((ushort)22); w.Write((ushort)16); w.Write(mask);
+            w.Write(new Guid("00000001-0000-0010-8000-00aa00389b71").ToByteArray());
+            w.Write(0x61746164); w.Write(0x7FFFF000); // data
+            for (int i = 0; i < blockSize; i++) {
+                for (int ch = 0; ch < channels; ch++) {
+                    w.Write((short)((ch + 1) * 1000));
+                }
+            }
+            wav.Position = 0;
+            WaveFormat format = WaveFormat.Read(wav);
+            Chunk chunk = PcmSource.Read(wav, format, blockSize).First();
+            for (int ch = 0, bit = 0; bit < 32; bit++) {
+                if ((mask & (1u << bit)) == 0) {
+                    continue;
+                }
+                Vector3 p = chunk.Positions[ch];
+                (int x, int y, int z) e = bit < side.Length ? side[bit] : side[2];
+                bool right = chunk.Samples[ch][0] == (ch + 1) * 1000 / 32768f && chunk.Lfe[ch] == (bit == 3)
+                    && Math.Sign(p.X) == e.x && Math.Sign(p.Y) == e.y && Math.Sign(p.Z) == e.z;
+                if (!right) {
+                    failed.Add($"{name} ch{ch} (bit {bit}) at {p}");
+                }
+                ch++;
+            }
+        }
+        Console.WriteLine(failed.Count == 0 ? $"PCM layouts OK ({layouts.Length})" : "PCM layouts FAILED: " + string.Join("; ", failed));
+        ok &= failed.Count == 0;
         return ok ? 0 : 1;
     }
 
@@ -390,7 +500,12 @@ static class Program {
                 if (output.SampleRate != sampleRate) {
                     Console.WriteLine($"Warning: spatial engine runs at {output.SampleRate} Hz, bridge assumes {sampleRate} Hz");
                 }
-                RenderLoop(output);
+                outputReady = true;
+                try {
+                    RenderLoop(output);
+                } finally {
+                    outputReady = false;
+                }
             } catch (Exception e) {
                 Log($"Spatial output unavailable: {e.Message}");
             }
