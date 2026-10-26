@@ -8,6 +8,9 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ServerGarbageCollection>false</ServerGarbageCollection>
     <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <!-- Loop methods (Feed, Pump, RenderLoop) JIT fully optimized at once: on-stack replacement with dynamic PGO
+         stalled the helper feed ~150-190 ms once, ~20 s after start, longer than the latency cushion -->
+    <TieredCompilationQuickJitForLoops>false</TieredCompilationQuickJitForLoops>
   </PropertyGroup>
 
   <ItemGroup>
