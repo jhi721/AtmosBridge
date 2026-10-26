@@ -59,7 +59,8 @@ bool is_extension(const dtsx::ElementaryFrame& frame) noexcept {
 
 class Decoder final {
 public:
-    // Core frame: decoded now, played when the next frame shows there is no extension (plain DTS).
+    // Core frame: decoded now, played when the next frame shows there is no extension (plain DTS). Once a core follows
+    // a core the stream is plain DTS, and play_core_only() plays every core as soon as it is decoded.
     bool core(dtsx::ElementaryFrame& frame, Planar& out, std::uint32_t& rate) {
         switch (frame.packing) {
         case dtsx::StreamPacking::DtsUhd:
@@ -77,6 +78,7 @@ public:
             break;
         }
         const bool played = core_pending_ && play_core(out, rate);
+        core_only_ = core_only_ || core_pending_;
         bed_.remember_core(frame);
         objects_.remember_core_metadata(frame);
         core_pending_ = true;
@@ -137,6 +139,17 @@ public:
         return core_pending_ && play_core(out, rate);
     }
 
+    // Plain DTS: the core just decoded plays now instead of one frame later.
+    // ponytail: assumes plain DTS stays plain; mpv reopens its AO (new helper) when the stream changes, a raw file
+    // that switches to DTS-HD mid-stream would play one frame twice
+    bool play_core_only(Planar& out, std::uint32_t& rate) {
+        if (!core_only_ || !core_pending_) {
+            return false;
+        }
+        core_pending_ = false;
+        return play_core(out, rate);
+    }
+
 private:
     // libdcadec's bed as the frame's bed (the object decoder had none)
     static void take_bed(DecodedObjectAudioFrame& decoded, DcaDecodedBed bed) {
@@ -161,6 +174,7 @@ private:
     DcaBedDecoder bed_;
     ObjectAudioRenderer renderer_{layout_};
     bool core_pending_ = false; // core frame not (yet) followed by an extension frame
+    bool core_only_ = false;    // a core followed a core: plain DTS, no extension frames
 };
 
 void write_frame(const Planar& pcm, std::uint32_t rate, std::vector<char>& out) {
@@ -217,6 +231,9 @@ int main() {
             try {
                 std::uint32_t rate = 0U;
                 if (is_extension(*frame) ? decoder->extension(*frame, pcm, rate) : decoder->core(*frame, pcm, rate)) {
+                    write_frame(pcm, rate, out);
+                }
+                if (decoder->play_core_only(pcm, rate)) {
                     write_frame(pcm, rate, out);
                 }
                 failing = false;
