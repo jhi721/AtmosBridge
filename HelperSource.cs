@@ -58,9 +58,12 @@ static class HelperSource {
                 if (!restarting || InputEnded) {
                     return false;
                 }
-                restarting = false;
-                Current.Dispose();
+                // New helper first: Feed may still hold the old one, which must count as replaced (not current, or
+                // restarting) when it fails. Disposing it while still current ended Feed and hung mpv on the pipe.
+                Process old = Current;
                 Start();
+                restarting = false;
+                old.Dispose();
                 log($"{exe} restarted after seek");
                 return true;
             }
