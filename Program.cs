@@ -499,10 +499,19 @@ static class Program {
             outputReady = playing = false;
             while (queue.TryTake(out _)) { }
             Interlocked.Exchange(ref buffered, 0);
-            for (int i = 0; i < 300 && running; i++) { // retry in 3 s, consuming one 10 ms block per 10 ms
+            // Retry in 3 s, dropping audio by the clock: Sleep(10) lasts ~15.6 ms at the default timer resolution, so one
+            // block per tick drained mpv at ~2/3 speed and stalled its video
+            long start = clock.ElapsedMilliseconds, dropped = 0;
+            while (running && clock.ElapsedMilliseconds - start < 3000) {
                 Thread.Sleep(10);
-                if (queue.TryTake(out Chunk dropped)) {
-                    Interlocked.Add(ref buffered, -dropped.Length);
+                long due = (clock.ElapsedMilliseconds - start) * sampleRate / 1000;
+                while (dropped < due) {
+                    if (!queue.TryTake(out Chunk chunk)) {
+                        dropped = due; // nothing queued (paused, not connected): no debt to burst through later
+                        break;
+                    }
+                    dropped += chunk.Length;
+                    Interlocked.Add(ref buffered, -chunk.Length);
                 }
             }
         }
