@@ -27,7 +27,8 @@ per user (no admin) to `%LOCALAPPDATA%\Programs\AtmosBridge`, self-contained (no
 - starts the bridge at sign-in (Startup shortcut, log in `%LOCALAPPDATA%\AtmosBridge\log.txt`);
 - adds the mpv settings below to `%APPDATA%\mpv\mpv.conf` (mpv [git-release](https://github.com/mpv-player/mpv/releases/tag/git-release) builds), between
   `# >>> AtmosBridge` / `# <<< AtmosBridge` markers (first run keeps a `.bak-atmosbridge` copy), and the companion
-  script `scripts\atmosbridge.lua` next to it. Uninstall removes both again.
+  script `scripts\atmosbridge.lua` next to it, and an `i` binding in `input.conf` (see What's playing). Uninstall
+  removes all of them again.
 
 Enable **Dolby Atmos for Headphones** (Windows sound settings → device → Spatial audio) on the output device first.
 
@@ -59,6 +60,17 @@ seek, then prebuffers again. Without IPC it still plays, but pause/seek leave ~0
 End to end (bridge cushion + Windows spatial engine + Dolby renderer) the sound leaves ~0.26 s after mpv writes
 it (`--latency` + ~0.16 s); `audio-delay=-0.26` lines it up with the picture (adjust it together with `--latency`). Measured with beep test videos and WASAPI loopback: within
 -19 ... +33 ms on the PCM, E-AC-3, TrueHD and DTS paths. Pause reaches the output after ~0.23 s, resume ~0.22 s.
+
+## What's playing
+
+mpv's stats (`i`) only show the passthrough format on `ao=pcm`. The bridge reports what actually reaches Windows,
+e.g. `TrueHD → 15 objects + LFE`, into `user-data/atmosbridge`; `atmosbridge.lua` shows it for 4 s in the bottom-left
+corner when playback starts or the layout changes. The installer binds `i` to show it together with stats (in
+`input.conf` next to `mpv.conf`, same markers; a hand-written setup adds the line itself):
+
+```
+i script-binding stats/display-stats; script-binding atmosbridge/info
+```
 
 ## Fallbacks
 

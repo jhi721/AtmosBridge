@@ -1,4 +1,4 @@
-# Adds or removes the AtmosBridge block in an mpv mpv.conf (UTF-8 without BOM, markers below).
+# Adds or removes the AtmosBridge blocks in an mpv mpv.conf and the input.conf next to it (UTF-8 without BOM, markers below).
 param(
     [Parameter(Mandatory)][ValidateSet('add', 'remove')][string]$Action,
     [Parameter(Mandatory)][string]$Path
@@ -23,35 +23,46 @@ $block = @(
     $end
 )
 
-if (-not (Test-Path -LiteralPath $Path)) {
-    if ($Action -eq 'remove') { exit 0 }
-    New-Item -ItemType Directory -Force (Split-Path $Path) | Out-Null
-    $lines = @()
-} else {
-    $lines = @([IO.File]::ReadAllText($Path) -split '\r?\n')
-}
-
-# Drop an existing block (also makes 'add' idempotent)
-$kept = [Collections.Generic.List[string]]::new()
-$inside = $false
-foreach ($line in $lines) {
-    if ($line.StartsWith('# >>> AtmosBridge')) { $inside = $true; continue }
-    if ($inside) { if ($line.StartsWith($end)) { $inside = $false }; continue }
-    $kept.Add($line)
-}
-while ($kept.Count -gt 0 -and $kept[$kept.Count - 1] -eq '') { $kept.RemoveAt($kept.Count - 1) }
-
-if ($Action -eq 'add') {
-    $backup = "$Path.bak-atmosbridge"
-    if ((Test-Path -LiteralPath $Path) -and -not (Test-Path -LiteralPath $backup)) {
-        Copy-Item -LiteralPath $Path $backup
+# Adds ($Action add) or drops the marked block in one mpv config file; first add keeps a .bak-atmosbridge copy
+function Update-Block([string]$File, [string[]]$Lines) {
+    if (-not (Test-Path -LiteralPath $File)) {
+        if ($Action -eq 'remove') { return }
+        New-Item -ItemType Directory -Force (Split-Path $File) | Out-Null
+        $old = @()
+    } else {
+        $old = @([IO.File]::ReadAllText($File) -split '\r?\n')
     }
-    if ($kept.Count -gt 0) { $kept.Add('') }
-    $kept.AddRange([string[]]$block)
+
+    # Drop an existing block (also makes 'add' idempotent)
+    $kept = [Collections.Generic.List[string]]::new()
+    $inside = $false
+    foreach ($line in $old) {
+        if ($line.StartsWith('# >>> AtmosBridge')) { $inside = $true; continue }
+        if ($inside) { if ($line.StartsWith($end)) { $inside = $false }; continue }
+        $kept.Add($line)
+    }
+    while ($kept.Count -gt 0 -and $kept[$kept.Count - 1] -eq '') { $kept.RemoveAt($kept.Count - 1) }
+
+    if ($Action -eq 'add') {
+        $backup = "$File.bak-atmosbridge"
+        if ((Test-Path -LiteralPath $File) -and -not (Test-Path -LiteralPath $backup)) {
+            Copy-Item -LiteralPath $File $backup
+        }
+        if ($kept.Count -gt 0) { $kept.Add('') }
+        $kept.AddRange($Lines)
+    }
+    [IO.File]::WriteAllText($File, (($kept -join "`r`n") + "`r`n"), [Text.UTF8Encoding]::new($false))
 }
 
 # The block opens with [default], so it is safe after any profile section; later options override earlier ones
-[IO.File]::WriteAllText($Path, (($kept -join "`r`n") + "`r`n"), [Text.UTF8Encoding]::new($false))
+Update-Block $Path $block
+
+# i shows mpv's stats and the bridge's "what plays" line together (input.conf: the last binding of a key wins)
+Update-Block (Join-Path (Split-Path $Path) 'input.conf') @(
+    $begin
+    'i script-binding stats/display-stats; script-binding atmosbridge/info'
+    $end
+)
 
 # Companion script (skips passthrough for 1-2 channel AC-3/E-AC-3), next to mpv.conf in scripts\
 $script = Join-Path (Split-Path $Path) 'scripts\atmosbridge.lua'

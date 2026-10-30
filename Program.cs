@@ -127,6 +127,7 @@ static class Program {
                     WaveFormat format = WaveFormat.Read(input);
                     if (OpenBitstream(format, ref input) is (Codec codec, Stream bitstream)) {
                         Log($"mpv connected: {codec} passthrough");
+                        inputName = codec switch { Codec.Eac3 => "E-AC-3", Codec.TrueHd => "TrueHD", _ => "DTS" };
                         passthrough = true;
                         try {
                             Pump(Chunks(codec, bitstream));
@@ -141,6 +142,7 @@ static class Program {
                         }
                     } else if (format.SampleRate == sampleRate && format.Bits is 8 or 16 or 32) {
                         Log($"mpv connected: PCM {format}");
+                        inputName = $"PCM {format.Channels} ch";
                         Pump(PcmSource.Read(input, format, blockSize));
                     } else {
                         Console.WriteLine($"Unsupported PCM {format}: set audio-samplerate={sampleRate} in mpv");
@@ -152,6 +154,10 @@ static class Program {
                 }
                 sessionActive = passthrough = false;
                 Log("mpv disconnected");
+                reported = null; // report again on the next connection (atmosbridge.lua clears it when mpv leaves the pipe)
+                lock (reportLock) {
+                    sent = null;
+                }
             }
         }
         running = false;
@@ -165,6 +171,28 @@ static class Program {
     /// The pipe carries a bitstream, which mpv's volume never touched: the render loop applies it (PCM comes scaled).
     /// </summary>
     static volatile bool passthrough;
+
+    /// <summary>
+    /// What mpv sends ("TrueHD", "PCM 2 ch", ...) and what the render loop last told mpv it plays (user-data/atmosbridge,
+    /// shown by atmosbridge.lua), null to report again.
+    /// </summary>
+    static volatile string inputName, reported;
+
+    static void Report(string text) {
+        reported = text;
+        // IPC writes can block: never on the render thread. Work items may run out of order, each sends the latest.
+        ThreadPool.QueueUserWorkItem(_ => {
+            lock (reportLock) {
+                if (reported is string latest && latest != sent) {
+                    sent = latest;
+                    MpvIpc.Command("set_property", "user-data/atmosbridge", latest);
+                }
+            }
+        });
+    }
+
+    static readonly object reportLock = new();
+    static string sent;
 
     /// <summary>
     /// Endpoint picked in the tray (or --device), null = auto. Persisted so the sign-in start keeps it.
@@ -594,6 +622,7 @@ static class Program {
         int handledFlush = flushRequests;
         long periods = 0, underruns = 0;
         float maxHeight = 0; // highest audible object since the last status line
+        (int, int, bool) shown = default; // layout in the last Report
 
         // Slot of each input channel/object: LFE -> 0, others -> 1, 2, ... (-1 when out of objects)
         int Slot(Chunk chunk, int index) {
@@ -696,6 +725,15 @@ static class Program {
             }
             stream.EndUpdatingAudioObjects();
 
+            if (consume && current != null) { // tell mpv what actually plays: objects that got a slot
+                int inputs = current.Lfe.Count(x => !x), active = Math.Min(inputs, slots.Count - 1);
+                bool lfe = inputs < current.Lfe.Length;
+                if (reported == null || (active, inputs, lfe) != shown) {
+                    shown = (active, inputs, lfe);
+                    Report($"{inputName} → {active} objects{(lfe ? " + LFE" : "")}" +
+                        (inputs > active ? $" ({inputs - active} dropped: out of objects)" : ""));
+                }
+            }
 
             if (consume && written < frames) {
                 underruns++;

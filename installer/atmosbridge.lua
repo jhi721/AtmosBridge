@@ -1,6 +1,6 @@
 -- AtmosBridge helper for mpv (installed by the AtmosBridge installer, removed on uninstall).
 --
--- Decides which audio mpv passes through to the bridge and which it decodes itself:
+-- Shows what the bridge plays (bottom of this file) and decides which audio mpv passes through to the bridge and which it decodes itself:
 -- * Before a file's decoder opens: the bridge's E-AC-3 decoder (Cavern) handles 5.1/7.1 and Atmos (JOC) but not
 --   stereo or mono (E-)AC-3. Those never carry Atmos anyway, so for such a track drop ac3/eac3 from audio-spdif.
 -- * "script-message atmosbridge-decode <codecs>" from the bridge, when one of its decoders fails on a stream anyway
@@ -120,3 +120,29 @@ mp.register_script_message("atmosbridge-decode", function(list)
         end
     end
 end)
+
+-- What the bridge actually plays ("TrueHD → 15 objects + LFE"): it sets user-data/atmosbridge once audio reaches the
+-- spatial output and whenever the layout changes. Shown for 4 s in the bottom-left corner, clear of the stats overlay
+-- (top-left), whose lines come from mpv's own read-only properties. To get it with stats, in input.conf:
+--   i script-binding stats/display-stats; script-binding atmosbridge/info
+local overlay = mp.create_osd_overlay("ass-events")
+local hide = mp.add_timeout(4, function() overlay:remove() end, true)
+local function show_info()
+    local info = mp.get_property_native("user-data/atmosbridge", "")
+    overlay.data = ([[{\an1\pos(20,700)\fs20\bord1.5}{\b1}AtmosBridge:{\b0} %s]]):format(info ~= "" and info or "not playing")
+    overlay:update()
+    hide:kill()
+    hide:resume()
+end
+mp.observe_property("user-data/atmosbridge", "native", function(_, info)
+    if type(info) == "string" and info ~= "" then
+        mp.msg.info(info)
+        show_info()
+    end
+end)
+mp.observe_property("current-ao", "string", function(_, ao)
+    if ao ~= "pcm" then
+        mp.set_property("user-data/atmosbridge", "") -- stale once mpv plays elsewhere
+    end
+end)
+mp.add_key_binding(nil, "info", show_info)
