@@ -25,7 +25,7 @@ env:
 
 jobs:
   build:
-    # The image already has the .NET 10 SDK (global.json), Rust and Inno Setup: nothing to install
+    # The image already has the .NET 10 SDK (global.json) and Rust; Inno Setup 7 is installed below
     runs-on: windows-latest
     steps:
       # Submodule (dtsx-objects/DTSX_decoder) only fetched when its helper has to be rebuilt, see below
@@ -46,7 +46,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: thd-objects/target/release/thd-objects.exe
-          key: thd-objects-${{ hashFiles('thd-objects/Cargo.toml', 'thd-objects/Cargo.lock', 'thd-objects/src/**') }}
+          key: thd-objects-${{ hashFiles('thd-objects/Cargo.toml', 'thd-objects/Cargo.lock', 'thd-objects/build.rs', 'thd-objects/*.rc', 'thd-objects/src/**', 'icons/thd-objects.ico') }}
 
       - name: Build thd-objects (TrueHD helper)
         if: steps.thd.outputs.cache-hit != 'true'
@@ -59,7 +59,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: dtsx-objects/build/Release/dtsx-objects.exe
-          key: dtsx-objects-${{ steps.version.outputs.dtsx }}-${{ hashFiles('dtsx-objects/main.cpp', 'dtsx-objects/CMakeLists.txt') }}
+          key: dtsx-objects-${{ steps.version.outputs.dtsx }}-${{ hashFiles('dtsx-objects/main.cpp', 'dtsx-objects/CMakeLists.txt', 'dtsx-objects/*.rc', 'icons/dtsx-objects.ico') }}
 
       - name: Build dtsx-objects (DTS helper)
         if: steps.dtsxcache.outputs.cache-hit != 'true'
@@ -91,11 +91,20 @@ jobs:
 
       # Measured on windows-latest (70 MB payload): lzma2/fast 2 threads 4.6 s / 29 MB, lzma2/max 1 thread 24 s / 24.9 MB,
       # max 2 threads 18 s / 25 MB (4 threads no faster). Releases get the small file, every other build the fast one.
+      # The image only has Inno Setup 6 (Chocolatey too): install the pinned 7 release, checked against its hash
+      - name: Install Inno Setup 7
+        shell: pwsh
+        run: |
+          $exe = "$env:RUNNER_TEMP\innosetup.exe"
+          Invoke-WebRequest https://github.com/jrsoftware/issrc/releases/download/is-7_1_1/innosetup-7.1.1-x64.exe -OutFile $exe
+          if ((Get-FileHash $exe).Hash -ne '8A5A6711C3766A6E5FB74F280BA0E3551E719CE94538D901FDBD1F8F9920B3F0') { throw 'Inno Setup installer hash mismatch' }
+          Start-Process $exe -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', "/DIR=$env:RUNNER_TEMP\is7" -Wait
+
       - name: Build installer
         shell: pwsh
         run: |
           $comp = if ($env:GITHUB_REF -like 'refs/tags/v*') { 'lzma2/max' } else { 'lzma2/fast' }
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Qp "/DMyAppVersion=$env:VERSION" "/DCompression=$comp" installer/AtmosBridge.iss
+          & "$env:RUNNER_TEMP\is7\ISCC.exe" /Qp "/DMyAppVersion=$env:VERSION" "/DCompression=$comp" installer/AtmosBridge.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
 
       - uses: actions/upload-artifact@v7

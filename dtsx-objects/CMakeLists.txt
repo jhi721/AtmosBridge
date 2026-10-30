@@ -16,7 +16,7 @@ endforeach()
 file(GLOB_RECURSE src ${DTSX}/src/*.cpp)
 list(FILTER src EXCLUDE REGEX "/(main|pipeline|p2_decoder|p2_decoder_unsupported|support_qr)\\.cpp$")
 
-add_executable(dtsx-objects main.cpp ${src} ${dcadec})
+add_executable(dtsx-objects main.cpp dtsx-objects.rc ${src} ${dcadec}) # .rc: icon
 target_include_directories(dtsx-objects PRIVATE ${DTSX} ${DTSX}/src ${DTSX}/third_party/dcadec)
 target_compile_definitions(dtsx-objects PRIVATE _USE_MATH_DEFINES _CRT_SECURE_NO_WARNINGS NDEBUG)
 if(MSVC)

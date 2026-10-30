@@ -11,3 +11,6 @@ truehd = "0.7.2"
 [profile.release]
 lto = true
 codegen-units = 1
+
+[build-dependencies]
+embed-resource = "3.0.12"
