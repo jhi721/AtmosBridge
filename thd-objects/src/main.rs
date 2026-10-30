@@ -141,18 +141,6 @@ fn main() -> std::io::Result<()> {
                 placements = au.channel_labels.iter().map(|&l| label_placement(l)).collect();
                 placements.resize(au.channel_count, Placement::default());
                 atmos = false;
-                // For the bridge (shown in mpv): the 16-channel presentation is Atmos objects, the others are channels
-                let format = if au.channel_count == 16 {
-                    "TrueHD Atmos".to_string()
-                } else {
-                    let lfe = placements.iter().filter(|p| p.lfe).count();
-                    format!("TrueHD {}.{lfe}", au.channel_count - lfe)
-                };
-                if format != reported {
-                    eprintln!("objects: {}", u8::from(au.channel_count == 16));
-                    eprintln!("format: {format}");
-                    reported = format;
-                }
             }
             if let Some(oamd) = au.oamd.last() {
                 if !atmos {
@@ -160,6 +148,20 @@ fn main() -> std::io::Result<()> {
                     atmos = true;
                 }
                 apply_oamd(oamd, &mut placements);
+            }
+            // For the bridge (shown in mpv): OAMD makes the presentation Atmos objects, whatever its size (Fury Road and
+            // John Wick 4 carry 12 objects, not 16); the 16-channel one is objects even before its first OAMD
+            let objects = atmos || au.channel_count == 16;
+            let format = if objects {
+                "TrueHD Atmos".to_string()
+            } else {
+                let lfe = placements.iter().filter(|p| p.lfe).count();
+                format!("TrueHD {}.{lfe}", au.channel_count - lfe)
+            };
+            if format != reported {
+                eprintln!("objects: {}", u8::from(objects));
+                eprintln!("format: {format}");
+                reported = format;
             }
 
             out.clear();
