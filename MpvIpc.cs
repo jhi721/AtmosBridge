@@ -16,6 +16,11 @@ static class MpvIpc {
     public static volatile string CurrentAo;
 
     /// <summary>
+    /// mpv's ao list starts with pcm, so ao-reload tries the bridge's pipe first (not with --ao=wasapi, say).
+    /// </summary>
+    public static volatile bool PcmFirst;
+
+    /// <summary>
     /// mpv's volume and mute as a linear gain (mpv's cubic curve, 100% = 1). mpv can't scale a passthrough bitstream itself.
     /// </summary>
     public static float Gain => mute ? 0 : volume;
@@ -43,6 +48,7 @@ static class MpvIpc {
                     writer.WriteLine("""{ "command": ["observe_property", 2, "current-ao"] }""");
                     writer.WriteLine("""{ "command": ["observe_property", 3, "volume"] }""");
                     writer.WriteLine("""{ "command": ["observe_property", 4, "mute"] }""");
+                    writer.WriteLine("""{ "command": ["observe_property", 5, "ao"] }""");
                     if (queued is (string json, long at) && Environment.TickCount64 - at < 5000) {
                         writer.WriteLine(json);
                     }
@@ -79,6 +85,10 @@ static class MpvIpc {
                                 case "mute":
                                     mute = d.ValueKind == JsonValueKind.True;
                                     break;
+                                case "ao":
+                                    PcmFirst = d.ValueKind == JsonValueKind.Array && d.GetArrayLength() > 0
+                                        && d[0].TryGetProperty("name", out JsonElement first) && first.GetString() == "pcm";
+                                    break;
                             }
                             break;
                     }
@@ -93,6 +103,7 @@ static class MpvIpc {
             }
             Paused = false;
             CurrentAo = null;
+            PcmFirst = false;
             volume = 1;
             mute = false;
             PlaybackRestart?.Invoke(); // never stay in seek-discard without mpv

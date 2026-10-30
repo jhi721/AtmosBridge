@@ -101,7 +101,8 @@ static class Program {
         // once the bridge can play, ask mpv to reopen its AO, which tries the pipe first. Checked a second after mpv's
         // AO changes (or IPC connects) or the spatial output opens, so a normal start has connected the pipe by then.
         aoCheck = new Timer(_ => {
-            if (outputReady && !sessionActive && MpvIpc.CurrentAo is "pcm" or "wasapi") {
+            // Only while pcm comes first: otherwise mpv reopens the same AO, whose change triggers the next reload
+            if (outputReady && !sessionActive && MpvIpc.PcmFirst && MpvIpc.CurrentAo is "pcm" or "wasapi") {
                 Log($"mpv plays to {MpvIpc.CurrentAo} without the bridge: reopening its audio output");
                 MpvIpc.Command("ao-reload");
             }
