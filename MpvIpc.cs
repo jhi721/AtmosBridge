@@ -15,6 +15,14 @@ static class MpvIpc {
     /// </summary>
     public static volatile string CurrentAo;
 
+    /// <summary>
+    /// mpv's volume and mute as a linear gain (mpv's cubic curve, 100% = 1). mpv can't scale a passthrough bitstream itself.
+    /// </summary>
+    public static float Gain => mute ? 0 : volume;
+
+    static volatile float volume = 1;
+    static volatile bool mute;
+
     public static event Action Seek, PlaybackRestart, AoChanged;
 
     static StreamWriter writer;
@@ -33,6 +41,8 @@ static class MpvIpc {
                     writer = new StreamWriter(pipe) { AutoFlush = true };
                     writer.WriteLine("""{ "command": ["observe_property", 1, "pause"] }""");
                     writer.WriteLine("""{ "command": ["observe_property", 2, "current-ao"] }""");
+                    writer.WriteLine("""{ "command": ["observe_property", 3, "volume"] }""");
+                    writer.WriteLine("""{ "command": ["observe_property", 4, "mute"] }""");
                     if (queued is (string json, long at) && Environment.TickCount64 - at < 5000) {
                         writer.WriteLine(json);
                     }
@@ -63,6 +73,12 @@ static class MpvIpc {
                                     CurrentAo = d.ValueKind == JsonValueKind.String ? d.GetString() : null;
                                     AoChanged?.Invoke();
                                     break;
+                                case "volume":
+                                    volume = d.ValueKind == JsonValueKind.Number ? (float)Math.Pow(Math.Max(d.GetDouble(), 0) / 100, 3) : 1;
+                                    break;
+                                case "mute":
+                                    mute = d.ValueKind == JsonValueKind.True;
+                                    break;
                             }
                             break;
                     }
@@ -77,6 +93,8 @@ static class MpvIpc {
             }
             Paused = false;
             CurrentAo = null;
+            volume = 1;
+            mute = false;
             PlaybackRestart?.Invoke(); // never stay in seek-discard without mpv
             Thread.Sleep(200);
         }

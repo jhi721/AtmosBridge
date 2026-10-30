@@ -82,8 +82,13 @@ static class Program {
 
         queue = new(Math.Max(4, targetSamples * 5 / 2 / blockSize));
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; running = false; queue.CompleteAdding(); };
-        var renderThread = new Thread(() => RenderSupervisor(deviceId)) { Priority = ThreadPriority.Highest, IsBackground = true };
+        if (deviceId == null && File.Exists(choicePath)) {
+            deviceId = File.ReadAllText(choicePath).Trim() is { Length: > 0 } saved ? saved : null;
+        }
+        ChosenDevice = deviceId;
+        var renderThread = new Thread(RenderSupervisor) { Priority = ThreadPriority.Highest, IsBackground = true };
         renderThread.Start();
+        Tray.Start();
 
         // Seek: drop what is buffered and whatever still arrives until mpv restarts playback at the new position
         MpvIpc.Seek += () => {
@@ -122,6 +127,7 @@ static class Program {
                     WaveFormat format = WaveFormat.Read(input);
                     if (OpenBitstream(format, ref input) is (Codec codec, Stream bitstream)) {
                         Log($"mpv connected: {codec} passthrough");
+                        passthrough = true;
                         try {
                             Pump(Chunks(codec, bitstream));
                         } catch (Exception e) when (e is not IOException && e is not EndOfStreamException && pipe.IsConnected) {
@@ -144,7 +150,7 @@ static class Program {
                 } catch (Exception e) {
                     Log("Decode error: " + e);
                 }
-                sessionActive = false;
+                sessionActive = passthrough = false;
                 Log("mpv disconnected");
             }
         }
@@ -154,6 +160,41 @@ static class Program {
     }
 
     static Timer aoCheck;
+
+    /// <summary>
+    /// The pipe carries a bitstream, which mpv's volume never touched: the render loop applies it (PCM comes scaled).
+    /// </summary>
+    static volatile bool passthrough;
+
+    /// <summary>
+    /// Endpoint picked in the tray (or --device), null = auto. Persisted so the sign-in start keeps it.
+    /// </summary>
+    internal static volatile string ChosenDevice;
+
+    /// <summary>
+    /// Endpoint the spatial stream is open on, null while there is none.
+    /// </summary>
+    internal static volatile string OpenDevice;
+
+    /// <summary>
+    /// Another endpoint is wanted (tray choice, or auto mode now picks a different one): the render loop returns and the
+    /// supervisor reopens.
+    /// </summary>
+    static volatile bool reopen;
+
+    static readonly string choicePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AtmosBridge", "device.txt");
+
+    internal static void Choose(string deviceId) {
+        ChosenDevice = deviceId;
+        reopen = true;
+        try {
+            Directory.CreateDirectory(Path.GetDirectoryName(choicePath));
+            File.WriteAllText(choicePath, deviceId ?? "");
+        } catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) {
+            Log($"Can't save the device choice: {e.Message}");
+        }
+        Log($"Device chosen: {deviceId ?? "auto"}");
+    }
 
     static void CheckAoSoon() => aoCheck?.Change(1000, Timeout.Infinite);
 
@@ -482,27 +523,43 @@ static class Program {
     /// Keep a spatial stream open, reopening it after failures. While there is none, drop audio in real time
     /// so mpv keeps playing (silently) instead of stalling on the pipe.
     /// </summary>
-    static void RenderSupervisor(string deviceId) {
+    static void RenderSupervisor() {
         while (running) {
             try {
+                string deviceId = ChosenDevice;
+                reopen = false;
                 using var output = new SpatialOutput(deviceId);
+                OpenDevice = output.DeviceId;
                 Log($"Spatial endpoint {output.DeviceId}: {output.MaxDynamicObjects} dynamic objects, {output.SampleRate} Hz");
                 if (output.SampleRate != sampleRate) {
                     Console.WriteLine($"Warning: spatial engine runs at {output.SampleRate} Hz, bridge assumes {sampleRate} Hz");
                 }
                 outputReady = true;
                 CheckAoSoon(); // mpv may be playing elsewhere while the output was missing
+                // Auto mode re-picks every 3 s: back to the headphones once their spatial sound is on again (the fallback
+                // endpoint was taken while it was off), or onto a new default device.
+                // ponytail: polling, Windows has no notification for spatial sound being switched on
+                using var follow = deviceId == null ? new Timer(_ => {
+                    if (SpatialOutput.AutoDevice() is string id && id != output.DeviceId) {
+                        reopen = true;
+                    }
+                }, null, 3000, 3000) : null;
                 RenderLoop(output);
+                if (reopen) {
+                    Log("Switching spatial endpoint");
+                    continue; // keep the queue, mpv plays on
+                }
             } catch (Exception e) {
                 Log($"Spatial output unavailable: {e.Message}");
             }
+            OpenDevice = null;
             outputReady = playing = false;
             while (queue.TryTake(out _)) { }
             Interlocked.Exchange(ref buffered, 0);
             // Retry in 3 s, dropping audio by the clock: Sleep(10) lasts ~15.6 ms at the default timer resolution, so one
             // block per tick drained mpv at ~2/3 speed and stalled its video
             long start = clock.ElapsedMilliseconds, dropped = 0;
-            while (running && clock.ElapsedMilliseconds - start < 3000) {
+            while (running && !reopen && clock.ElapsedMilliseconds - start < 3000) {
                 Thread.Sleep(10);
                 long due = (clock.ElapsedMilliseconds - start) * sampleRate / 1000;
                 while (dropped < due) {
@@ -553,7 +610,7 @@ static class Program {
         }
 
         SpatialOutput.Check(stream.Start(), "Start");
-        while (running) {
+        while (running && !reopen) {
             output.BufferEvent.WaitOne(100);
             int hr = stream.BeginUpdatingAudioObjects(out _, out uint frames);
             if (hr < 0) {
@@ -621,6 +678,8 @@ static class Program {
             Interlocked.Add(ref buffered, -written);
 
             if (consume && current != null) {
+                // ponytail: SetVolume takes 0..1, so mpv volume above 100% doesn't boost a passthrough stream
+                float gain = passthrough ? Math.Min(MpvIpc.Gain, 1) : 1;
                 for (int i = 0; i < current.Samples.Length; i++) {
                     int slot = Slot(current, i);
                     if (slot > 0) {
@@ -631,11 +690,12 @@ static class Program {
                         }
                     }
                     if (slot >= 0) {
-                        slots[slot].SetVolume(current.Volumes[i]);
+                        slots[slot].SetVolume(Math.Min(current.Volumes[i] * gain, 1));
                     }
                 }
             }
             stream.EndUpdatingAudioObjects();
+
 
             if (consume && written < frames) {
                 underruns++;

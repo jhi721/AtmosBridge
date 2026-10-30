@@ -25,7 +25,7 @@ Download `AtmosBridge-<version>-setup.exe` from Releases (or the `build` workflo
 per user (no admin) to `%LOCALAPPDATA%\Programs\AtmosBridge`, self-contained (no .NET runtime needed), and optionally:
 
 - starts the bridge at sign-in (Startup shortcut, log in `%LOCALAPPDATA%\AtmosBridge\log.txt`);
-- adds the mpv settings below to `%APPDATA%\mpv.net\mpv.conf` and/or `%APPDATA%\mpv\mpv.conf`, between
+- adds the mpv settings below to `%APPDATA%\mpv\mpv.conf` (mpv [git-release](https://github.com/mpv-player/mpv/releases/tag/git-release) builds), between
   `# >>> AtmosBridge` / `# <<< AtmosBridge` markers (first run keeps a `.bak-atmosbridge` copy), and the companion
   script `scripts\atmosbridge.lua` next to it. Uninstall removes both again.
 

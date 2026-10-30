@@ -1,4 +1,4 @@
-# Adds or removes the AtmosBridge block in an mpv / mpv.net mpv.conf (UTF-8 without BOM, markers below).
+# Adds or removes the AtmosBridge block in an mpv mpv.conf (UTF-8 without BOM, markers below).
 param(
     [Parameter(Mandatory)][ValidateSet('add', 'remove')][string]$Action,
     [Parameter(Mandatory)][string]$Path

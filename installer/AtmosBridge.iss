@@ -51,8 +51,8 @@ UninstallDisplayName=AtmosBridge
 
 [Tasks]
 Name: autostart; Description: "Start AtmosBridge when I sign in to Windows"
-Name: mpvnet; Description: "Configure mpv.net (adds an AtmosBridge block to %APPDATA%\mpv.net\mpv.conf)"; Check: HasMpvNet
-Name: mpv; Description: "Configure mpv (adds an AtmosBridge block to %APPDATA%\mpv\mpv.conf)"; Check: HasMpv; Flags: unchecked
+; mpv git-release builds (github.com/mpv-player/mpv/releases/tag/git-release) read %APPDATA%\mpv\mpv.conf
+Name: mpv; Description: "Configure mpv (adds an AtmosBridge block to %APPDATA%\mpv\mpv.conf)"
 
 [Files]
 Source: "..\publish\*"; Excludes: "*.pdb"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
@@ -66,7 +66,6 @@ Name: "{userprograms}\AtmosBridge\AtmosBridge"; Filename: "{app}\{#Exe}"; Parame
 Name: "{userprograms}\AtmosBridge\AtmosBridge log"; Filename: "{localappdata}\AtmosBridge\log.txt"
 
 [Run]
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\mpvconf.ps1"" -Action add -Path ""{userappdata}\mpv.net\mpv.conf"""; Flags: runhidden; Tasks: mpvnet
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\mpvconf.ps1"" -Action add -Path ""{userappdata}\mpv\mpv.conf"""; Flags: runhidden; Tasks: mpv
 Filename: "{app}\{#Exe}"; Parameters: "--log ""{localappdata}\AtmosBridge\log.txt"""; Description: "Start AtmosBridge now"; Flags: nowait postinstall skipifsilent
 
@@ -79,16 +78,6 @@ Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Fil
 Type: filesandordirs; Name: "{localappdata}\AtmosBridge"
 
 [Code]
-function HasMpvNet: Boolean;
-begin
-  Result := DirExists(ExpandConstant('{userappdata}\mpv.net'));
-end;
-
-function HasMpv: Boolean;
-begin
-  Result := DirExists(ExpandConstant('{userappdata}\mpv'));
-end;
-
 // Upgrades: the running bridge (and its thd-objects / dtsx-objects child) lock the files being replaced
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var

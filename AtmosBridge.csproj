@@ -5,6 +5,7 @@
     <TargetFramework>net10.0-windows</TargetFramework>
     <Nullable>disable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <UseWindowsForms>true</UseWindowsForms> <!-- tray icon -->
     <ApplicationIcon>icons\atmosbridge.ico</ApplicationIcon> <!-- regenerate with icons\make_icons.py -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ServerGarbageCollection>false</ServerGarbageCollection>
@@ -16,6 +17,9 @@
 
   <ItemGroup>
     <PackageReference Include="Cavern.Format" Version="2.1.0" />
+    <!-- WinForms only in Tray.cs: its global usings would make Timer ambiguous everywhere else -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
   </ItemGroup>
 
   <ItemGroup>

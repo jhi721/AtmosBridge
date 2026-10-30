@@ -1,4 +1,4 @@
--- AtmosBridge helper for mpv / mpv.net (installed by the AtmosBridge installer, removed on uninstall).
+-- AtmosBridge helper for mpv (installed by the AtmosBridge installer, removed on uninstall).
 --
 -- Decides which audio mpv passes through to the bridge and which it decodes itself:
 -- * Before a file's decoder opens: the bridge's E-AC-3 decoder (Cavern) handles 5.1/7.1 and Atmos (JOC) but not

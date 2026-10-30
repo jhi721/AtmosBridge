@@ -20,8 +20,28 @@ interface IMMDeviceCollection {
 [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 interface IMMDevice {
     [PreserveSig] int Activate(ref Guid iid, int clsCtx, IntPtr activationParams, [MarshalAs(UnmanagedType.IUnknown)] out object obj);
-    [PreserveSig] int OpenPropertyStore(int access, out IntPtr store);
+    [PreserveSig] int OpenPropertyStore(int access, out IPropertyStore store);
     [PreserveSig] int GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
+}
+
+[ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IPropertyStore {
+    [PreserveSig] int GetCount(out uint count);
+    [PreserveSig] int GetAt(uint index, out PropertyKey key);
+    [PreserveSig] int GetValue(ref PropertyKey key, out PropVariant value);
+}
+
+struct PropertyKey {
+    public Guid FormatId;
+    public int PropertyId;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+struct PropVariant {
+    public ushort Type;
+    ushort reserved1, reserved2, reserved3;
+    public IntPtr Pointer;
+    IntPtr padding;
 }
 
 [ComImport, Guid("BBF8E066-AAAA-49BE-9A4D-FD2A858EA27F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -85,38 +105,19 @@ sealed class SpatialOutput : IDisposable {
     readonly IntPtr activationParams, propVariant;
 
     public SpatialOutput(string deviceId) {
-        var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
-        IMMDevice device;
-        ISpatialAudioClient client;
-        uint maxDynamic;
+        const string spatialOff = "Spatial sound is off (0 dynamic objects). Enable Dolby Atmos for Headphones on the output device.";
         if (deviceId == null) {
-            // Default endpoint if spatial sound is on there, else the first active endpoint that has it
-            Check(enumerator.GetDefaultAudioEndpoint(0 /* eRender */, 1 /* eMultimedia */, out device), "GetDefaultAudioEndpoint");
-            (client, maxDynamic) = Spatial(device);
-            if (maxDynamic == 0) {
-                Check(enumerator.EnumAudioEndpoints(0 /* eRender */, 1 /* DEVICE_STATE_ACTIVE */, out IMMDeviceCollection all), "EnumAudioEndpoints");
-                all.GetCount(out uint count);
-                for (uint i = 0; i < count && maxDynamic == 0; i++) {
-                    if (all.Item(i, out IMMDevice candidate) >= 0) {
-                        (ISpatialAudioClient candidateClient, uint objects) = Spatial(candidate);
-                        if (objects > 0) {
-                            (device, client, maxDynamic) = (candidate, candidateClient, objects);
-                        }
-                    }
-                }
-            }
-        } else {
-            if (!deviceId.StartsWith("{0.0.0.")) {
-                deviceId = "{0.0.0.00000000}." + deviceId;
-            }
-            Check(enumerator.GetDevice(deviceId, out device), "GetDevice " + deviceId);
-            (client, maxDynamic) = Spatial(device);
+            deviceId = AutoDevice() ?? throw new InvalidOperationException(spatialOff);
+        } else if (!deviceId.StartsWith("{0.0.0.")) {
+            deviceId = "{0.0.0.00000000}." + deviceId;
         }
+        var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+        Check(enumerator.GetDevice(deviceId, out IMMDevice device), "GetDevice " + deviceId);
+        (ISpatialAudioClient client, uint maxDynamic) = Spatial(device);
         if (maxDynamic == 0) {
-            throw new InvalidOperationException("Spatial sound is off (0 dynamic objects). Enable Dolby Atmos for Headphones on the output device.");
+            throw new InvalidOperationException(spatialOff);
         }
-        device.GetId(out string id);
-        DeviceId = id;
+        DeviceId = deviceId;
         MaxDynamicObjects = maxDynamic;
 
         Check(client.GetSupportedAudioObjectFormatEnumerator(out IAudioFormatEnumerator formats), "format enumerator");
@@ -142,6 +143,60 @@ sealed class SpatialOutput : IDisposable {
         Guid iidStream = typeof(ISpatialAudioObjectRenderStream).GUID;
         Check(client.ActivateSpatialAudioStream(propVariant, ref iidStream, out object s), "ActivateSpatialAudioStream");
         Stream = (ISpatialAudioObjectRenderStream)s;
+    }
+
+    /// <summary>
+    /// The endpoint auto mode plays to: the default one if spatial sound is on there, else the first active endpoint that
+    /// has it (null: none).
+    /// </summary>
+    public static string AutoDevice() {
+        var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+        if (enumerator.GetDefaultAudioEndpoint(0 /* eRender */, 1 /* eMultimedia */, out IMMDevice device) >= 0 && Spatial(device).Item2 > 0) {
+            device.GetId(out string id);
+            return id;
+        }
+        if (enumerator.EnumAudioEndpoints(0 /* eRender */, 1 /* DEVICE_STATE_ACTIVE */, out IMMDeviceCollection all) >= 0) {
+            all.GetCount(out uint count);
+            for (uint i = 0; i < count; i++) {
+                if (all.Item(i, out IMMDevice candidate) >= 0 && Spatial(candidate).Item2 > 0) {
+                    candidate.GetId(out string id);
+                    return id;
+                }
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Active render endpoints for the tray menu, with whether spatial sound is on there.
+    /// </summary>
+    public static List<(string Id, string Name, bool Spatial)> Devices() {
+        var devices = new List<(string, string, bool)>();
+        var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+        if (enumerator.EnumAudioEndpoints(0 /* eRender */, 1 /* DEVICE_STATE_ACTIVE */, out IMMDeviceCollection all) < 0) {
+            return devices;
+        }
+        all.GetCount(out uint count);
+        for (uint i = 0; i < count; i++) {
+            if (all.Item(i, out IMMDevice device) >= 0) {
+                device.GetId(out string id);
+                devices.Add((id, FriendlyName(device) ?? id, Spatial(device).Item2 > 0));
+            }
+        }
+        return devices;
+    }
+
+    [DllImport("ole32.dll")]
+    static extern int PropVariantClear(ref PropVariant value);
+
+    static string FriendlyName(IMMDevice device) {
+        var key = new PropertyKey { FormatId = new("A45C254E-DF1C-4EFD-8020-67D146A850E0"), PropertyId = 14 }; // PKEY_Device_FriendlyName
+        if (device.OpenPropertyStore(0 /* STGM_READ */, out IPropertyStore store) < 0 || store.GetValue(ref key, out PropVariant value) < 0) {
+            return null;
+        }
+        string name = value.Type == 31 /* VT_LPWSTR */ ? Marshal.PtrToStringUni(value.Pointer) : null;
+        PropVariantClear(ref value);
+        return name;
     }
 
     /// <summary>
