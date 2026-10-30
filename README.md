@@ -27,8 +27,9 @@ per user (no admin) to `%LOCALAPPDATA%\Programs\AtmosBridge`, self-contained (no
 - starts the bridge at sign-in (Startup shortcut, log in `%LOCALAPPDATA%\AtmosBridge\log.txt`);
 - adds the mpv settings below to `%APPDATA%\mpv\mpv.conf` (mpv [git-release](https://github.com/mpv-player/mpv/releases/tag/git-release) builds), between
   `# >>> AtmosBridge` / `# <<< AtmosBridge` markers (first run keeps a `.bak-atmosbridge` copy), and the companion
-  script `scripts\atmosbridge.lua` next to it, and an `i` binding in `input.conf` (see What's playing). Uninstall
-  removes all of them again.
+  script `scripts\atmosbridge.lua` next to it, and an `i` binding in `input.conf` (see What's playing). The folder
+  can be changed on the next page (e.g. a portable mpv's `portable_config`); reinstalls remember it, a new folder takes
+  the blocks out of the old one, and uninstall removes them again.
 
 Enable **Dolby Atmos for Headphones** (Windows sound settings → device → Spatial audio) on the output device first.
 
