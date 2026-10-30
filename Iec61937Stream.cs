@@ -40,6 +40,11 @@ sealed class Iec61937Stream(Stream input) : Stream {
     static ReadOnlySpan<byte> Sync => [0x72, 0xF8, 0x1F, 0x4E];
 
     /// <summary>
+    /// Plain AC-3 rather than E-AC-3 (both are Codec.Eac3), from the first data burst.
+    /// </summary>
+    public bool Ac3 { get; private set; }
+
+    /// <summary>
     /// Codec of the first data burst, null if the input ends before one. Blocks until then.
     /// </summary>
     public Codec? WaitForCodec() {
@@ -126,14 +131,19 @@ sealed class Iec61937Stream(Stream input) : Stream {
         Span<ushort> words = MemoryMarshal.Cast<byte, ushort>(payload.AsSpan(0, padded));
         BinaryPrimitives.ReverseEndianness(words, words);
         (Codec? burst, payloadPos, payloadLen) = type switch {
-            typeEac3 or typeAc3 => (Codec.Eac3, 0, length), // Cavern's E-AC-3 decoder also takes plain AC-3
+            // Cavern's E-AC-3 decoder is meant to take plain AC-3 too, but 2.1.0 misparses its coupling and throws:
+            // atmosbridge.lua keeps AC-3 in mpv, and a burst arriving anyway goes back through the decode fallback
+            typeEac3 or typeAc3 => (Codec.Eac3, 0, length),
             typeTrueHd when length == 61424 => (Codec.TrueHd, 0, UnwrapMat(length)),
             typeDtsHd => DtsHdFrame(length),
             _ when dtsCore => (Codec.Dts, 0, length),
             _ => (null, 0, 0), // pause bursts, MPEG etc.: skipped
         };
         // ponytail: the first burst fixes the codec; mpv reopens the AO (a new pipe connection) when it changes
-        codec ??= burst;
+        if (codec == null && burst != null) {
+            codec = burst;
+            Ac3 = type == typeAc3;
+        }
         return true;
     }
 

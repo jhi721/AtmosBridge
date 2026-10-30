@@ -16,7 +16,8 @@ DTS, DTS-HD and DTS:X are passed through too (`audio-spdif=dts-hd`, IEC 61937 DT
 burst framing and pipes the raw DTS into `dtsx-objects.exe`, a C++ helper built on
 [DTSX_decoder](https://github.com/almirus/DTSX_decoder) (git submodule): libdcadec decodes the core / DTS-HD bed,
 DTSX_decoder decodes the DTS:X object waveforms and metadata, removes their fold-down from the bed and pans them
-with its renderer into 7.1.4. The 12 channels go to Windows as one object per speaker.
+with its renderer into 7.1.4. The 12 channels go to Windows as one object per speaker; DTS without X keeps its own
+layout (5.1 goes out as 5.1).
 Any other codec (AAC, FLAC, ...) arrives as PCM and is sent as one object per speaker position.
 
 ## Install
@@ -64,10 +65,20 @@ it (`--latency` + ~0.16 s); `audio-delay=-0.26` lines it up with the picture (ad
 
 ## What's playing
 
-mpv's stats (`i`) only show the passthrough format on `ao=pcm`. The bridge reports what actually reaches Windows,
-e.g. `TrueHD → 15 objects + LFE`, into `user-data/atmosbridge`; `atmosbridge.lua` shows it for 4 s in the bottom-left
-corner when playback starts or the layout changes. The installer binds `i` to show it together with stats (in
-`input.conf` next to `mpv.conf`, same markers; a hand-written setup adds the line itself):
+mpv's stats (`i`) only show the passthrough format on `ao=pcm`. The bridge reports what actually reaches Windows into
+`user-data/atmosbridge`; `atmosbridge.lua` shows it for 4 s in the bottom-left corner on `i` (with stats, see below)
+and logs it. Objects only where the stream has them, channels as their layout:
+
+| Stream | Shown |
+|---|---|
+| TrueHD Atmos, E-AC-3 Atmos (JOC) | `TrueHD Atmos → 15 objects + LFE` |
+| TrueHD, E-AC-3 without objects | `TrueHD 7.1 → 7.1 (8 channels)` |
+| DTS, DTS-ES, DTS-HD HRA / MA | `DTS-HD MA 5.1 → 5.1 (6 channels)`: its own channels, no upmix |
+| DTS:X | `DTS:X → 7.1.4 (12 channels)`: dtsx-objects renders the bed, heights and objects to 7.1.4 |
+| decoded by mpv | `PCM → 5.1 (6 channels)` |
+
+The installer binds `i` to show it together with stats (in `input.conf` next to `mpv.conf`, same markers; a
+hand-written setup adds the line itself):
 
 ```
 i script-binding stats/display-stats; script-binding atmosbridge/info
@@ -75,8 +86,9 @@ i script-binding stats/display-stats; script-binding atmosbridge/info
 
 ## Fallbacks
 
-- Stereo / mono AC-3 and E-AC-3 (no Atmos possible; Cavern can't decode them): `atmosbridge.lua` drops ac3/eac3
-  from `audio-spdif` for that file before the decoder opens, so mpv decodes it and the bridge gets PCM.
+- AC-3 (any layout) and stereo / mono E-AC-3 (no Atmos possible; Cavern can't decode them, its 2.1.0 AC-3 coupling
+  parse is broken): `atmosbridge.lua` drops them from `audio-spdif` for that file before the decoder opens, so mpv
+  decodes it and the bridge gets PCM.
 - Any passthrough stream a decoder still fails on (e.g. after a manual track switch, TrueHD above 48 kHz): the
   bridge sends `script-message atmosbridge-decode <codecs>` over IPC; the script drops them from `audio-spdif` for
   this file and reselects the track, the bridge keeps the pipe flowing meanwhile and takes the PCM on mpv's

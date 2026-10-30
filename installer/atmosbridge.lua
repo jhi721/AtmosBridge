@@ -2,7 +2,8 @@
 --
 -- Shows what the bridge plays (bottom of this file) and decides which audio mpv passes through to the bridge and which it decodes itself:
 -- * Before a file's decoder opens: the bridge's E-AC-3 decoder (Cavern) handles 5.1/7.1 and Atmos (JOC) but not
---   stereo or mono (E-)AC-3. Those never carry Atmos anyway, so for such a track drop ac3/eac3 from audio-spdif.
+--   stereo or mono E-AC-3, nor AC-3 at all (Cavern 2.1.0 misparses AC-3 coupling). Those never carry Atmos anyway, so
+--   for such a track drop them from audio-spdif: mpv's decoder gives the same channels.
 -- * "script-message atmosbridge-decode <codecs>" from the bridge, when one of its decoders fails on a stream anyway
 --   (manual track switch, TrueHD above 48 kHz, ...): drop those codecs and reopen the decoder.
 -- Changes are file-local, so the next file starts from the configured audio-spdif again.
@@ -76,7 +77,9 @@ end
 mp.add_hook("on_preloaded", 50, function()
     local t = predicted_audio_track()
     local channels = t and t["demux-channel-count"] or 0
-    if t and (t.codec == "ac3" or t.codec == "eac3") and channels >= 1 and channels <= 2 then
+    if t and t.codec == "ac3" then
+        decode_in_mpv({ "ac3" }, "ac3")
+    elseif t and t.codec == "eac3" and channels >= 1 and channels <= 2 then
         decode_in_mpv({ "ac3", "eac3" }, ("%s %d ch"):format(t.codec, channels))
     end
 end)
@@ -122,8 +125,9 @@ mp.register_script_message("atmosbridge-decode", function(list)
 end)
 
 -- What the bridge actually plays ("TrueHD → 15 objects + LFE"): it sets user-data/atmosbridge once audio reaches the
--- spatial output and whenever the layout changes. Shown for 4 s in the bottom-left corner, clear of the stats overlay
--- (top-left), whose lines come from mpv's own read-only properties. To get it with stats, in input.conf:
+-- spatial output and whenever the layout changes. "script-binding atmosbridge/info" shows it for 4 s in the bottom-left
+-- corner, clear of the stats overlay (top-left), whose lines come from mpv's own read-only properties. To get it with
+-- stats, in input.conf (the installer adds it):
 --   i script-binding stats/display-stats; script-binding atmosbridge/info
 local overlay = mp.create_osd_overlay("ass-events")
 local hide = mp.add_timeout(4, function() overlay:remove() end, true)
@@ -137,7 +141,9 @@ end
 mp.observe_property("user-data/atmosbridge", "native", function(_, info)
     if type(info) == "string" and info ~= "" then
         mp.msg.info(info)
-        show_info()
+        if hide:is_enabled() then -- on screen: keep it current
+            show_info()
+        end
     end
 end)
 mp.observe_property("current-ao", "string", function(_, ao)

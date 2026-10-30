@@ -5,6 +5,8 @@
 //!   channels x { f32 x, f32 y, f32 z, f32 gain, u8 lfe }   Windows space: x right, y up, -z front, room cube [-1, 1]
 //!   samples x channels f32                                interleaved, [-1, 1)
 //!
+//! stderr: log lines, and "objects: 0|1" then "format: TrueHD Atmos" / "format: TrueHD 7.1" when the stream changes.
+//!
 //! Atmos streams decode the 16-channel object presentation and take positions and gains from OAMD
 //! (beds at their speaker positions); other streams decode their largest presentation at speaker positions.
 
@@ -99,6 +101,7 @@ fn main() -> std::io::Result<()> {
 
     let mut placements: Vec<Placement> = Vec::new();
     let mut atmos = false;
+    let mut reported = String::new(); // last "format:" line
     let mut resyncing = false;
     let mut input = vec![0u8; 1 << 16];
     let mut out = Vec::new();
@@ -138,6 +141,18 @@ fn main() -> std::io::Result<()> {
                 placements = au.channel_labels.iter().map(|&l| label_placement(l)).collect();
                 placements.resize(au.channel_count, Placement::default());
                 atmos = false;
+                // For the bridge (shown in mpv): the 16-channel presentation is Atmos objects, the others are channels
+                let format = if au.channel_count == 16 {
+                    "TrueHD Atmos".to_string()
+                } else {
+                    let lfe = placements.iter().filter(|p| p.lfe).count();
+                    format!("TrueHD {}.{lfe}", au.channel_count - lfe)
+                };
+                if format != reported {
+                    eprintln!("objects: {}", u8::from(au.channel_count == 16));
+                    eprintln!("format: {format}");
+                    reported = format;
+                }
             }
             if let Some(oamd) = au.oamd.last() {
                 if !atmos {

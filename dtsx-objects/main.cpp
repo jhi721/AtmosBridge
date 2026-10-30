@@ -1,4 +1,8 @@
-// Raw DTS (core, DTS-HD, DTS:X) on stdin -> 7.1.4 PCM at speaker positions on stdout, for AtmosBridge.
+// Raw DTS (core, DTS-HD, DTS:X) on stdin -> PCM at speaker positions on stdout, for AtmosBridge: DTS:X as 7.1.4, other
+// DTS as its own channels (5.1 stays 5.1).
+//
+// stderr: log lines, and "objects: 0" then "format: <name>" ("DTS-HD MA 7.1", "DTS:X", ...) whenever the stream's
+// format changes: the bridge gets channels, never objects.
 //
 // Same framing as thd-objects (see thd-objects/src/main.rs), per decoded frame (little-endian):
 //   u16 channels, u16 samples, u32 sample_rate
@@ -14,6 +18,7 @@
 // ponytail: including pipeline.cpp ties this file to upstream internals (anonymous-namespace helpers); after a
 // submodule bump rebuild and rerun the DTS:X check. Upgrade path: upstream exports a per-frame render_frame().
 #include "app/pipeline.cpp"
+#include "dca_context.h" // DCADEC_PROFILE_*
 
 #include <fcntl.h>
 #include <io.h>
@@ -106,6 +111,19 @@ public:
             take_bed(decoded, std::move(decoded_bed));
         }
         rate = decoded.sample_rate;
+        // DTS:X has its extension sync word also when channel-based (7.1 bed + heights, no objects). Sticky: a frame
+        // without it keeps the name.
+        dtsx_ = dtsx_ || decoded.dtsx_extension_sync_word != 0U || !decoded.objects.empty();
+        if (dtsx_) {
+            set_format(decoded.imax_enhanced ? "DTS:X IMAX Enhanced" : "DTS:X", decoded);
+        } else {
+            const std::int32_t profile = bed_.extension_stream_info().profile;
+            set_format(std::string(profile & DCADEC_PROFILE_HD_MA ? "DTS-HD MA"
+                                   : profile & DCADEC_PROFILE_HD_HRA ? "DTS-HD HRA"
+                                   : profile & DCADEC_PROFILE_EXPRESS ? "DTS Express" : "DTS-HD")
+                           + layout_name(decoded.bed_channels.size(), decoded.bed_speaker_activity_mask),
+                       decoded);
+        }
 
         if (!decoded.objects.empty() && !renderer_.remove_embedded_object_fold_down(decoded)) {
             throw std::runtime_error("embedded object fold-down removal failed");
@@ -166,8 +184,56 @@ private:
         DecodedObjectAudioFrame decoded;
         take_bed(decoded, bed_.decoded_core());
         rate = decoded.sample_rate;
+        set_format((bed_.core_stream_info().es_matrix_surround ? "DTS-ES" : "DTS")
+                       + layout_name(decoded.bed_channels.size(), decoded.bed_speaker_activity_mask),
+                   decoded);
         return map_xll_bed_to_layout(decoded, layout_, out);
     }
+
+    // New format: find the 7.1.4 outputs the stream really has. DTS:X fills all of them (heights, rendered objects);
+    // anything else is mapped with a constant bed, and the outputs that stay silent are left out: a 5.1 stream goes
+    // to Windows as 5.1, not as 7.1.4 with six silent channels that would look like an upmix.
+    void set_format(std::string format, const DecodedObjectAudioFrame& decoded) {
+        if (format == format_) {
+            return;
+        }
+        format_ = std::move(format);
+        active_.fill(true);
+        if (dtsx_) {
+            return;
+        }
+        DecodedObjectAudioFrame probe;
+        probe.bed_speaker_activity_mask = decoded.bed_speaker_activity_mask;
+        probe.bed_channels.assign(decoded.bed_channels.size(), std::vector<std::int32_t>(1U, 1));
+        Planar mapped;
+        if (map_xll_bed_to_layout(probe, layout_, mapped)) {
+            for (std::size_t i = 0U; i < kChannels; ++i) {
+                active_[i] = !mapped[i].empty() && mapped[i][0] != 0;
+            }
+        }
+    }
+
+    // " 5.1", " 7.1", ...: channel count and DTS speaker activity mask (LFE1 = 0x8; 7.1 is 0x84B)
+    static std::string layout_name(std::size_t channels, std::uint32_t mask) {
+        const std::size_t lfe = mask & 0x8U ? 1U : 0U;
+        return channels == 0U || lfe > channels ? "" : " " + std::to_string(channels - lfe) + "." + std::to_string(lfe);
+    }
+
+public:
+    // What the stream is ("DTS-HD MA 7.1", "DTS:X", ...), from the last frame played
+    const std::string& format() const noexcept {
+        return format_;
+    }
+
+    // 7.1.4 outputs that carry the stream's channels
+    const std::array<bool, kChannels>& active() const noexcept {
+        return active_;
+    }
+
+private:
+    std::string format_;
+    std::array<bool, kChannels> active_{};
+    bool dtsx_ = false; // DTS:X seen
 
     ChannelLayout layout_ = *find_layout("7.1.4");
     ObjectFrameDecoder objects_;
@@ -177,21 +243,26 @@ private:
     bool core_only_ = false;    // a core followed a core: plain DTS, no extension frames
 };
 
-void write_frame(const Planar& pcm, std::uint32_t rate, std::vector<char>& out) {
+void write_frame(const Planar& pcm, const std::array<bool, kChannels>& active, std::uint32_t rate, std::vector<char>& out) {
     if (pcm.size() != kChannels || pcm.front().empty()) {
         return;
     }
     const std::size_t samples = pcm.front().size();
-    out.resize(8U + kChannels * 17U + samples * kChannels * 4U);
+    const auto channels = static_cast<std::size_t>(std::count(active.begin(), active.end(), true));
+    out.resize(8U + channels * 17U + samples * channels * 4U);
     char* cursor = out.data();
     const auto put = [&cursor](const auto& value) {
         std::memcpy(cursor, &value, sizeof value);
         cursor += sizeof value;
     };
-    put(static_cast<std::uint16_t>(kChannels));
+    put(static_cast<std::uint16_t>(channels));
     put(static_cast<std::uint16_t>(samples));
     put(rate);
-    for (const Speaker& speaker : kSpeakers) {
+    for (std::size_t i = 0U; i < kChannels; ++i) {
+        if (!active[i]) {
+            continue;
+        }
+        const Speaker& speaker = kSpeakers[i];
         put(speaker.x);
         put(speaker.y);
         put(speaker.z);
@@ -199,8 +270,10 @@ void write_frame(const Planar& pcm, std::uint32_t rate, std::vector<char>& out) 
         put(static_cast<std::uint8_t>(speaker.lfe));
     }
     for (std::size_t sample = 0U; sample < samples; ++sample) {
-        for (const auto& channel : pcm) {
-            put(static_cast<float>(channel[sample]) / 8388608.0F); // 24-bit
+        for (std::size_t i = 0U; i < kChannels; ++i) {
+            if (active[i]) {
+                put(static_cast<float>(pcm[i][sample]) / 8388608.0F); // 24-bit
+            }
         }
     }
     std::fwrite(out.data(), 1, out.size(), stdout);
@@ -219,6 +292,7 @@ int main() {
     std::vector<unsigned char> input(1 << 16);
     std::vector<char> out;
     Planar pcm;
+    std::string format;
     bool failing = false;
     int n;
     // _read returns what the pipe has instead of waiting for a full buffer
@@ -231,12 +305,16 @@ int main() {
             try {
                 std::uint32_t rate = 0U;
                 if (is_extension(*frame) ? decoder->extension(*frame, pcm, rate) : decoder->core(*frame, pcm, rate)) {
-                    write_frame(pcm, rate, out);
+                    write_frame(pcm, decoder->active(), rate, out);
                 }
                 if (decoder->play_core_only(pcm, rate)) {
-                    write_frame(pcm, rate, out);
+                    write_frame(pcm, decoder->active(), rate, out);
                 }
                 failing = false;
+                if (!decoder->format().empty() && decoder->format() != format) { // the bridge shows it in mpv
+                    format = decoder->format();
+                    std::fprintf(stderr, "objects: 0\nformat: %s\n", format.c_str()); // DTS:X objects come pre-rendered
+                }
             } catch (const std::exception& e) {
                 if (!failing) {
                     std::fprintf(stderr, "dtsx-objects: %s; restarting the decoder\n", e.what());
@@ -248,7 +326,7 @@ int main() {
     }
     std::uint32_t rate = 0U;
     if (decoder->flush(pcm, rate)) {
-        write_frame(pcm, rate, out);
+        write_frame(pcm, decoder->active(), rate, out);
     }
     return 0;
 }

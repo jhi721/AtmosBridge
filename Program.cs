@@ -127,7 +127,12 @@ static class Program {
                     WaveFormat format = WaveFormat.Read(input);
                     if (OpenBitstream(format, ref input) is (Codec codec, Stream bitstream)) {
                         Log($"mpv connected: {codec} passthrough");
-                        inputName = codec switch { Codec.Eac3 => "E-AC-3", Codec.TrueHd => "TrueHD", _ => "DTS" };
+                        inputName = codec switch {
+                            Codec.Eac3 => bitstream is Iec61937Stream { Ac3: true } ? "AC-3" : "E-AC-3",
+                            Codec.TrueHd => "TrueHD",
+                            _ => "DTS",
+                        };
+                        objectBased = false; // until the decoder says so
                         passthrough = true;
                         try {
                             Pump(Chunks(codec, bitstream));
@@ -142,7 +147,8 @@ static class Program {
                         }
                     } else if (format.SampleRate == sampleRate && format.Bits is 8 or 16 or 32) {
                         Log($"mpv connected: PCM {format}");
-                        inputName = $"PCM {format.Channels} ch";
+                        inputName = "PCM";
+                        objectBased = false;
                         Pump(PcmSource.Read(input, format, blockSize));
                     } else {
                         Console.WriteLine($"Unsupported PCM {format}: set audio-samplerate={sampleRate} in mpv");
@@ -173,10 +179,15 @@ static class Program {
     static volatile bool passthrough;
 
     /// <summary>
-    /// What mpv sends ("TrueHD", "PCM 2 ch", ...) and what the render loop last told mpv it plays (user-data/atmosbridge,
-    /// shown by atmosbridge.lua), null to report again.
+    /// What mpv sends ("TrueHD Atmos", "DTS-HD MA 7.1", "PCM", ...) and what the render loop last told mpv it plays
+    /// (user-data/atmosbridge, shown by atmosbridge.lua), null to report again.
     /// </summary>
     static volatile string inputName, reported;
+
+    /// <summary>
+    /// The decoder delivers real objects (E-AC-3 JOC, TrueHD Atmos), not channels at speaker positions.
+    /// </summary>
+    static volatile bool objectBased;
 
     static void Report(string text) {
         reported = text;
@@ -286,9 +297,22 @@ static class Program {
     /// </summary>
     static IEnumerable<Chunk> Chunks(Codec codec, Stream bitstream) => codec switch {
         Codec.Eac3 => CavernChunks(OpenEac3(bitstream), () => bitstream is Iec61937Stream { EndOfInput: true }),
-        Codec.TrueHd => HelperSource.Read(HelperSource.TrueHd, bitstream, blockSize, Log),
-        _ => HelperSource.Read(HelperSource.Dts, bitstream, blockSize, Log),
+        Codec.TrueHd => HelperSource.Read(HelperSource.TrueHd, bitstream, blockSize, HelperLog),
+        _ => HelperSource.Read(HelperSource.Dts, bitstream, blockSize, HelperLog),
     };
+
+    /// <summary>
+    /// Helper stderr: "objects: 1" (real objects, else channels) and "format: TrueHD Atmos" describe the stream for mpv,
+    /// in that order; the rest is log.
+    /// </summary>
+    static void HelperLog(string line) {
+        if (line.StartsWith("objects: ")) {
+            objectBased = line == "objects: 1";
+        } else if (line.StartsWith("format: ")) {
+            inputName = line["format: ".Length..];
+        }
+        Log(line);
+    }
 
     /// <summary>
     /// --file input: raw TrueHD / DTS go to their helpers, a passthrough capture .wav is unwrapped like the live pipe,
@@ -391,6 +415,10 @@ static class Program {
         }
         IReadOnlyList<Source> objects = renderer.Objects;
         Log($"Decoding: {objects.Count} objects, has objects (JOC): {renderer.HasObjects}");
+        objectBased = renderer.HasObjects;
+        if (renderer.HasObjects) {
+            inputName = "E-AC-3 Atmos";
+        }
         Vector3 roomInverse = Vector3.One / Listener.EnvironmentSize;
 
         while (!ended()) {
@@ -429,8 +457,13 @@ static class Program {
 
         var iec = new Iec61937Stream(wire);
         byte[] expected = [.. frameA, .. frameB, .. frameA], got = new byte[expected.Length];
-        bool ok = iec.WaitForCodec() == Codec.Eac3 && iec.Length == frameA.Length && iec.Read(got, 0, got.Length) == got.Length
+        bool ok = iec.WaitForCodec() == Codec.Eac3 && !iec.Ac3 && iec.Length == frameA.Length && iec.Read(got, 0, got.Length) == got.Length
             && got.SequenceEqual(expected) && iec.Read(new byte[1], 0, 1) == 0 && iec.EndOfInput;
+        var ac3Wire = new MemoryStream();
+        Burst(ac3Wire, 1, frameA.Length * 8, frameA);
+        ac3Wire.Position = 0;
+        var ac3 = new Iec61937Stream(ac3Wire);
+        ok &= ac3.WaitForCodec() == Codec.Eac3 && ac3.Ac3; // named AC-3 in mpv
         Console.WriteLine(ok ? "IEC 61937 OK" : "IEC 61937 FAILED: " + Convert.ToHexString(got));
 
 
@@ -622,7 +655,7 @@ static class Program {
         int handledFlush = flushRequests;
         long periods = 0, underruns = 0;
         float maxHeight = 0; // highest audible object since the last status line
-        (int, int, bool) shown = default; // layout in the last Report
+        (string, bool, int, int, int) shown = default; // stream and layout in the last Report
 
         // Slot of each input channel/object: LFE -> 0, others -> 1, 2, ... (-1 when out of objects)
         int Slot(Chunk chunk, int index) {
@@ -725,13 +758,19 @@ static class Program {
             }
             stream.EndUpdatingAudioObjects();
 
-            if (consume && current != null) { // tell mpv what actually plays: objects that got a slot
+            // Tell mpv what actually plays (inputs that got a slot), only while it is on the pipe: the tail queued after
+            // it left would reach the next mpv as a stale report. Objects only where the stream has them; channels at
+            // speaker positions (they go out as dynamic objects too) as their layout, e.g. "7.1.4 (12 channels)".
+            if (consume && current != null && sessionActive) {
                 int inputs = current.Lfe.Count(x => !x), active = Math.Min(inputs, slots.Count - 1);
-                bool lfe = inputs < current.Lfe.Length;
-                if (reported == null || (active, inputs, lfe) != shown) {
-                    shown = (active, inputs, lfe);
-                    Report($"{inputName} → {active} objects{(lfe ? " + LFE" : "")}" +
-                        (inputs > active ? $" ({inputs - active} dropped: out of objects)" : ""));
+                int lfe = current.Lfe.Length - inputs;
+                if (reported == null || (inputName, objectBased, active, inputs, lfe) != shown) {
+                    shown = (inputName, objectBased, active, inputs, lfe);
+                    int heights = Enumerable.Range(0, current.Lfe.Length).Count(i => !current.Lfe[i] && current.Positions[i].Y > .5f);
+                    string layout = objectBased
+                        ? $"{active} objects{(lfe > 0 ? " + LFE" : "")}"
+                        : $"{inputs - heights}.{lfe}{(heights > 0 ? $".{heights}" : "")} ({inputs + lfe} channel{(inputs + lfe == 1 ? "" : "s")})";
+                    Report($"{inputName} → {layout}" + (inputs > active ? $", {inputs - active} dropped: out of objects" : ""));
                 }
             }
 
