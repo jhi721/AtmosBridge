@@ -131,8 +131,9 @@ sealed class Iec61937Stream(Stream input) : Stream {
         Span<ushort> words = MemoryMarshal.Cast<byte, ushort>(payload.AsSpan(0, padded));
         BinaryPrimitives.ReverseEndianness(words, words);
         (Codec? burst, payloadPos, payloadLen) = type switch {
-            // Cavern's E-AC-3 decoder is meant to take plain AC-3 too, but 2.1.0 misparses its coupling and throws:
-            // atmosbridge.lua keeps AC-3 in mpv, and a burst arriving anyway goes back through the decode fallback
+            // ponytail: Cavern's E-AC-3 decoder is meant to take plain AC-3 too, but 2.1.0 misparses its coupling and
+            // throws: atmosbridge.lua keeps AC-3 in mpv, and a burst arriving anyway goes back through the decode
+            // fallback. Let AC-3 through again once a Cavern release fixes DecodeCouplingStrategy.
             typeEac3 or typeAc3 => (Codec.Eac3, 0, length),
             typeTrueHd when length == 61424 => (Codec.TrueHd, 0, UnwrapMat(length)),
             typeDtsHd => DtsHdFrame(length),

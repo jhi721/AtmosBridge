@@ -26,6 +26,9 @@ static class Tray {
         thread.Start();
     }
 
+    /// <summary>
+    /// Rebuild the menu: Auto, every active endpoint (spatial state, the one playing), Exit.
+    /// </summary>
     static void Fill(ContextMenuStrip menu, NotifyIcon icon) {
         menu.Items.Clear();
         string chosen = Program.ChosenDevice, open = Program.OpenDevice;

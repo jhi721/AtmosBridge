@@ -4,6 +4,7 @@
 -- * Before a file's decoder opens: the bridge's E-AC-3 decoder (Cavern) handles 5.1/7.1 and Atmos (JOC) but not
 --   stereo or mono E-AC-3, nor AC-3 at all (Cavern 2.1.0 misparses AC-3 coupling). Those never carry Atmos anyway, so
 --   for such a track drop them from audio-spdif: mpv's decoder gives the same channels.
+--   ponytail: AC-3 only because of the Cavern bug; pass it through again once a Cavern release fixes it.
 -- * "script-message atmosbridge-decode <codecs>" from the bridge, when one of its decoders fails on a stream anyway
 --   (manual track switch, TrueHD above 48 kHz, ...): drop those codecs and reopen the decoder.
 -- Changes are file-local, so the next file starts from the configured audio-spdif again.
@@ -100,6 +101,9 @@ end
 -- skips display-resample for spdif). The configured mode comes back once mpv plays elsewhere.
 local configured_sync -- while replaced
 mp.observe_property("current-ao", "string", function(_, ao)
+    if ao ~= "pcm" then
+        mp.set_property("user-data/atmosbridge", "") -- the bridge's report (below) is stale once mpv plays elsewhere
+    end
     if ao == "pcm" and not configured_sync then
         local sync = mp.get_property("video-sync")
         if sync:match("^display%-") and not sync:match("desync$") then
@@ -124,7 +128,7 @@ mp.register_script_message("atmosbridge-decode", function(list)
     end
 end)
 
--- What the bridge actually plays ("TrueHD → 15 objects + LFE"): it sets user-data/atmosbridge once audio reaches the
+-- What the bridge actually plays ("TrueHD Atmos → 15 objects + LFE", "DTS-HD MA 5.1 → 5.1 (6 channels)"): it sets user-data/atmosbridge once audio reaches the
 -- spatial output and whenever the layout changes. "script-binding atmosbridge/info" shows it for 4 s in the bottom-left
 -- corner, clear of the stats overlay (top-left), whose lines come from mpv's own read-only properties. To get it with
 -- stats, in input.conf (the installer adds it):
@@ -144,11 +148,6 @@ mp.observe_property("user-data/atmosbridge", "native", function(_, info)
         if hide:is_enabled() then -- on screen: keep it current
             show_info()
         end
-    end
-end)
-mp.observe_property("current-ao", "string", function(_, ao)
-    if ao ~= "pcm" then
-        mp.set_property("user-data/atmosbridge", "") -- stale once mpv plays elsewhere
     end
 end)
 mp.add_key_binding(nil, "info", show_info)

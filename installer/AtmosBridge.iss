@@ -12,6 +12,7 @@
   #define BlockThreads "2"
 #endif
 #define Exe "AtmosBridge.exe"
+#define MpvDefaultDir "{userappdata}\mpv"
 #define AppGuid "{25C5F212-A339-413A-8EFD-76FEDCEBFAA9}"
 
 [Setup]
@@ -68,11 +69,12 @@ Name: "{userprograms}\AtmosBridge\AtmosBridge"; Filename: "{app}\{#Exe}"; Parame
 Name: "{userprograms}\AtmosBridge\AtmosBridge log"; Filename: "{localappdata}\AtmosBridge\log.txt"
 
 [Run]
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\mpvconf.ps1"" -Action add -Path ""{code:MpvConf}"""; Flags: runhidden; Tasks: mpv
+; mpv's config: CurStepChanged
 Filename: "{app}\{#Exe}"; Parameters: "--log ""{localappdata}\AtmosBridge\log.txt"""; Description: "Start AtmosBridge now"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/f /t /im {#Exe}"; Flags: runhidden; RunOnceId: "StopBridge"
+; Installs from before mpv.net was dropped could have configured it too
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\mpvconf.ps1"" -Action remove -Path ""{userappdata}\mpv.net\mpv.conf"""; Flags: runhidden; RunOnceId: "ConfMpvNet"
 ; The mpv config folder chosen at install: CurUninstallStepChanged
 
@@ -102,14 +104,15 @@ procedure InitializeWizard;
 begin
   // Installs from before the folder choice configured %APPDATA%\mpv
   if RegKeyExists(HKCU, UninstallKey) then
-    OldMpvDir := GetPreviousData('MpvDir', ExpandConstant('{userappdata}\mpv'));
+    OldMpvDir := GetPreviousData('MpvDir', ExpandConstant('{#MpvDefaultDir}'));
   MpvDirPage := CreateInputDirPage(wpSelectTasks, 'mpv configuration', 'Which folder does mpv read mpv.conf from?',
     'AtmosBridge adds its settings to mpv.conf and input.conf there and its script to scripts\. ' +
     'Usually %APPDATA%\mpv; a portable mpv reads portable_config next to mpv.exe.', False, '');
   MpvDirPage.Add('');
-  MpvDirPage.Values[0] := OldMpvDir;
-  if OldMpvDir = '' then
-    MpvDirPage.Values[0] := ExpandConstant('{userappdata}\mpv');
+  if OldMpvDir <> '' then
+    MpvDirPage.Values[0] := OldMpvDir
+  else
+    MpvDirPage.Values[0] := ExpandConstant('{#MpvDefaultDir}');
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
@@ -126,11 +129,6 @@ begin
     SetPreviousData(PreviousDataKey, 'MpvDir', OldMpvDir);
 end;
 
-function MpvConf(Param: String): String;
-begin
-  Result := AddBackslash(MpvDirPage.Values[0]) + 'mpv.conf';
-end;
-
 procedure RunMpvConf(Action, Dir: String);
 var
   Code: Integer;
@@ -139,12 +137,14 @@ begin
     Action + ' -Path "' + AddBackslash(Dir) + 'mpv.conf"', '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 
-// Reinstalled with another folder: take the blocks out of the old one
+// Configure the chosen folder; reinstalled with another one: take the blocks out of the old one
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  if (CurStep = ssPostInstall) and WizardIsTaskSelected('mpv') and (OldMpvDir <> '')
-    and (CompareText(RemoveBackslash(OldMpvDir), RemoveBackslash(MpvDirPage.Values[0])) <> 0) then
-    RunMpvConf('remove', OldMpvDir);
+  if (CurStep = ssPostInstall) and WizardIsTaskSelected('mpv') then begin
+    if (OldMpvDir <> '') and (CompareText(RemoveBackslash(OldMpvDir), RemoveBackslash(MpvDirPage.Values[0])) <> 0) then
+      RunMpvConf('remove', OldMpvDir);
+    RunMpvConf('add', MpvDirPage.Values[0]);
+  end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
@@ -154,7 +154,7 @@ begin
   // usUninstall runs before {app} is deleted (mpvconf.ps1 lives there). Installs without the value used %APPDATA%\mpv.
   if CurUninstallStep = usUninstall then begin
     if not RegQueryStringValue(HKCU, UninstallKey, 'Inno Setup CodeFile: MpvDir', Dir) then
-      Dir := ExpandConstant('{userappdata}\mpv');
+      Dir := ExpandConstant('{#MpvDefaultDir}');
     RunMpvConf('remove', Dir);
   end;
 end;

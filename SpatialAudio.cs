@@ -151,39 +151,34 @@ sealed class SpatialOutput : IDisposable {
     /// </summary>
     public static string AutoDevice() {
         var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
-        if (enumerator.GetDefaultAudioEndpoint(0 /* eRender */, 1 /* eMultimedia */, out IMMDevice device) >= 0 && Spatial(device).Item2 > 0) {
+        if (enumerator.GetDefaultAudioEndpoint(0 /* eRender */, 1 /* eMultimedia */, out IMMDevice device) >= 0 && Spatial(device).MaxDynamic > 0) {
             device.GetId(out string id);
             return id;
         }
-        if (enumerator.EnumAudioEndpoints(0 /* eRender */, 1 /* DEVICE_STATE_ACTIVE */, out IMMDeviceCollection all) >= 0) {
-            all.GetCount(out uint count);
-            for (uint i = 0; i < count; i++) {
-                if (all.Item(i, out IMMDevice candidate) >= 0 && Spatial(candidate).Item2 > 0) {
-                    candidate.GetId(out string id);
-                    return id;
-                }
-            }
-        }
-        return null;
+        return ActiveEndpoints().FirstOrDefault(e => Spatial(e.Device).MaxDynamic > 0).Id;
     }
 
     /// <summary>
     /// Active render endpoints for the tray menu, with whether spatial sound is on there.
     /// </summary>
-    public static List<(string Id, string Name, bool Spatial)> Devices() {
-        var devices = new List<(string, string, bool)>();
+    public static List<(string Id, string Name, bool Spatial)> Devices() =>
+        [.. ActiveEndpoints().Select(e => (e.Id, FriendlyName(e.Device) ?? e.Id, Spatial(e.Device).MaxDynamic > 0))];
+
+    /// <summary>
+    /// Active render endpoints with their ids.
+    /// </summary>
+    static IEnumerable<(IMMDevice Device, string Id)> ActiveEndpoints() {
         var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
         if (enumerator.EnumAudioEndpoints(0 /* eRender */, 1 /* DEVICE_STATE_ACTIVE */, out IMMDeviceCollection all) < 0) {
-            return devices;
+            yield break;
         }
         all.GetCount(out uint count);
         for (uint i = 0; i < count; i++) {
             if (all.Item(i, out IMMDevice device) >= 0) {
                 device.GetId(out string id);
-                devices.Add((id, FriendlyName(device) ?? id, Spatial(device).Item2 > 0));
+                yield return (device, id);
             }
         }
-        return devices;
     }
 
     [DllImport("ole32.dll")]
@@ -202,7 +197,7 @@ sealed class SpatialOutput : IDisposable {
     /// <summary>
     /// Spatial client of an endpoint and its dynamic object count (0: spatial sound off or unsupported).
     /// </summary>
-    static (ISpatialAudioClient, uint) Spatial(IMMDevice device) {
+    static (ISpatialAudioClient Client, uint MaxDynamic) Spatial(IMMDevice device) {
         Guid iid = typeof(ISpatialAudioClient).GUID;
         if (device.Activate(ref iid, 1, IntPtr.Zero, out object c) < 0) {
             return (null, 0);

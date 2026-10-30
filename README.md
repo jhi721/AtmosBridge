@@ -72,8 +72,10 @@ and logs it. Objects only where the stream has them, channels as their layout:
 | Stream | Shown |
 |---|---|
 | TrueHD Atmos, E-AC-3 Atmos (JOC) | `TrueHD Atmos → 15 objects + LFE` |
-| TrueHD, E-AC-3 without objects | `TrueHD 7.1 → 7.1 (8 channels)` |
-| DTS, DTS-ES, DTS-HD HRA / MA | `DTS-HD MA 5.1 → 5.1 (6 channels)`: its own channels, no upmix |
+| TrueHD without objects | `TrueHD 7.1 → 7.1 (8 channels)` |
+| E-AC-3 without objects | `E-AC-3 → 5.1 (6 channels)` |
+| DTS, DTS-HD HRA / MA | `DTS-HD MA 5.1 → 5.1 (6 channels)`: its own channels, no upmix |
+| DTS-ES 6.1 (discrete) | `DTS-ES 6.1 → 7.1 (8 channels)`: 7.1.4 has no back centre, so it plays on both back speakers at -3 dB |
 | DTS:X | `DTS:X → 7.1.4 (12 channels)`: dtsx-objects renders the bed, heights and objects to 7.1.4 |
 | decoded by mpv | `PCM → 5.1 (6 channels)` |
 
@@ -83,6 +85,16 @@ hand-written setup adds the line itself):
 ```
 i script-binding stats/display-stats; script-binding atmosbridge/info
 ```
+
+## Tray and volume
+
+The tray icon lists the render endpoints (spatial sound on or off, the one playing marked) next to **Auto**, and exits
+the bridge. A choice is saved in `%LOCALAPPDATA%\AtmosBridge\device.txt` and used on the next start when `--device` is
+not given; picking one reopens the spatial stream while mpv plays on. Auto re-checks every 3 s, so it moves back to the
+default endpoint once spatial sound is on there again, or to a new default device.
+
+mpv can't scale a passthrough bitstream, so the bridge applies mpv's volume and mute to it (mpv's cubic curve, capped
+at 100%: above that Windows takes no more gain). PCM arrives already scaled by mpv.
 
 ## Fallbacks
 
@@ -109,7 +121,7 @@ bin\Release\net10.0-windows\AtmosBridge.exe --device {5384faff-9e6b-4060-8de7-b7
 
 | Option | Default | |
 |---|---|---|
-| `--device` | auto | render endpoint id (`mpv --audio-device=help`, part after `wasapi/`). Auto: the default endpoint if spatial sound is on there, else the first active endpoint that has it |
+| `--device` | tray choice, else auto | render endpoint id (`mpv --audio-device=help`, part after `wasapi/`). Auto: the default endpoint if spatial sound is on there, else the first active endpoint that has it |
 | `--pipe` | `atmos` | audio pipe (`ao-pcm-file=\\.\pipe\atmos`) |
 | `--ipc` | `mpv-atmos` | mpv IPC pipe (`input-ipc-server=\\.\pipe\mpv-atmos`) |
 | `--latency` | `0.1` | buffer cushion in seconds |

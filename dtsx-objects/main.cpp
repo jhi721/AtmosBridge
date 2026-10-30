@@ -1,8 +1,8 @@
 // Raw DTS (core, DTS-HD, DTS:X) on stdin -> PCM at speaker positions on stdout, for AtmosBridge: DTS:X as 7.1.4, other
 // DTS as its own channels (5.1 stays 5.1).
 //
-// stderr: log lines, and "objects: 0" then "format: <name>" ("DTS-HD MA 7.1", "DTS:X", ...) whenever the stream's
-// format changes: the bridge gets channels, never objects.
+// stderr: log lines, and "format: <name>" ("DTS-HD MA 7.1", "DTS:X", ...) whenever the stream's format changes. No
+// "objects: 1": the bridge gets channels, DTS:X objects arrive rendered.
 //
 // Same framing as thd-objects (see thd-objects/src/main.rs), per decoded frame (little-endian):
 //   u16 channels, u16 samples, u32 sample_rate
@@ -56,6 +56,29 @@ constexpr Speaker kSpeakers[] = {
 constexpr std::size_t kChannels = std::size(kSpeakers);
 
 using Planar = std::vector<std::vector<std::int32_t>>;
+
+// A speaker bed mapped to 7.1.4. 7.1.4 has no back centre: a DTS-ES 6.1 Cs (DTS physical bit 6) would be dropped, so
+// it goes to both back outputs (BL, BR) at -3 dB.
+bool map_bed(const DecodedObjectAudioFrame& decoded, const ChannelLayout& layout, Planar& out) {
+    if (!map_xll_bed_to_layout(decoded, layout, out)) {
+        return false;
+    }
+    const std::vector<std::uint32_t> physical = dtsx::expand_speaker_activity_mask(decoded.bed_speaker_activity_mask);
+    const auto cs = std::find(physical.begin(), physical.end(), 1U << 6U);
+    const auto index = static_cast<std::size_t>(cs - physical.begin());
+    if (cs == physical.end() || index >= decoded.bed_channels.size()) {
+        return true;
+    }
+    for (const std::size_t back : {4U, 5U}) {
+        for (std::size_t sample = 0U; sample < out[back].size(); ++sample) {
+            const std::int64_t mixed = out[back][sample] + std::llround(decoded.bed_channels[index][sample] * 0.70710678);
+            out[back][sample] = static_cast<std::int32_t>(
+                std::clamp<std::int64_t>(mixed, (std::numeric_limits<std::int32_t>::min)(),
+                                         (std::numeric_limits<std::int32_t>::max)()));
+        }
+    }
+    return true;
+}
 
 bool is_extension(const dtsx::ElementaryFrame& frame) noexcept {
     return frame.packing == dtsx::StreamPacking::ExtensionBigEndian
@@ -130,7 +153,7 @@ public:
         }
         Planar bed;
         if (!map_supplemental_xll_to_height_layout(decoded, layout_, bed)
-            && !map_xll_bed_to_layout(decoded, layout_, bed)) {
+            && !map_bed(decoded, layout_, bed)) {
             throw std::runtime_error("bed cannot be mapped to 7.1.4");
         }
         Planar rendered;
@@ -168,6 +191,11 @@ public:
         return play_core(out, rate);
     }
 
+    // 7.1.4 outputs that carry the stream's channels
+    const std::array<bool, kChannels>& active() const noexcept {
+        return active_;
+    }
+
 private:
     // libdcadec's bed as the frame's bed (the object decoder had none)
     static void take_bed(DecodedObjectAudioFrame& decoded, DcaDecodedBed bed) {
@@ -187,7 +215,7 @@ private:
         set_format((bed_.core_stream_info().es_matrix_surround ? "DTS-ES" : "DTS")
                        + layout_name(decoded.bed_channels.size(), decoded.bed_speaker_activity_mask),
                    decoded);
-        return map_xll_bed_to_layout(decoded, layout_, out);
+        return map_bed(decoded, layout_, out);
     }
 
     // New format: find the 7.1.4 outputs the stream really has. DTS:X fills all of them (heights, rendered objects);
@@ -198,6 +226,7 @@ private:
             return;
         }
         format_ = std::move(format);
+        std::fprintf(stderr, "format: %s\n", format_.c_str()); // the bridge shows it in mpv
         active_.fill(true);
         if (dtsx_) {
             return;
@@ -206,7 +235,7 @@ private:
         probe.bed_speaker_activity_mask = decoded.bed_speaker_activity_mask;
         probe.bed_channels.assign(decoded.bed_channels.size(), std::vector<std::int32_t>(1U, 1));
         Planar mapped;
-        if (map_xll_bed_to_layout(probe, layout_, mapped)) {
+        if (map_bed(probe, layout_, mapped)) {
             for (std::size_t i = 0U; i < kChannels; ++i) {
                 active_[i] = !mapped[i].empty() && mapped[i][0] != 0;
             }
@@ -216,21 +245,9 @@ private:
     // " 5.1", " 7.1", ...: channel count and DTS speaker activity mask (LFE1 = 0x8; 7.1 is 0x84B)
     static std::string layout_name(std::size_t channels, std::uint32_t mask) {
         const std::size_t lfe = mask & 0x8U ? 1U : 0U;
-        return channels == 0U || lfe > channels ? "" : " " + std::to_string(channels - lfe) + "." + std::to_string(lfe);
+        return channels == 0U ? "" : " " + std::to_string(channels - lfe) + "." + std::to_string(lfe);
     }
 
-public:
-    // What the stream is ("DTS-HD MA 7.1", "DTS:X", ...), from the last frame played
-    const std::string& format() const noexcept {
-        return format_;
-    }
-
-    // 7.1.4 outputs that carry the stream's channels
-    const std::array<bool, kChannels>& active() const noexcept {
-        return active_;
-    }
-
-private:
     std::string format_;
     std::array<bool, kChannels> active_{};
     bool dtsx_ = false; // DTS:X seen
@@ -279,11 +296,29 @@ void write_frame(const Planar& pcm, const std::array<bool, kChannels>& active, s
     std::fwrite(out.data(), 1, out.size(), stdout);
 }
 
+// DTS-ES 6.1 bed (C, L R, Ls Rs, LFE, Cs = 7): Cs lands on BL and BR at -3 dB, so 8 outputs carry sound
+int self_test() {
+    DecodedObjectAudioFrame bed;
+    bed.bed_speaker_activity_mask = 0x1FU;
+    for (std::int32_t channel = 0; channel < 7; ++channel) {
+        bed.bed_channels.push_back({(channel + 1) * 1000});
+    }
+    Planar out;
+    const bool mapped = map_bed(bed, *find_layout("7.1.4"), out);
+    const auto active = mapped ? std::count_if(out.begin(), out.end(), [](const auto& c) { return c[0] != 0; }) : 0;
+    const bool ok = active == 8 && out[4][0] == 4950 && out[5][0] == 4950; // Cs (7000) x 0.7071
+    std::printf("DTS-ES Cs fold %s (%d outputs)\n", ok ? "OK" : "FAILED", static_cast<int>(active));
+    return ok ? 0 : 1;
+}
+
 } // namespace
 } // namespace dtsx_decode
 
-int main() {
+int main(int argc, char** argv) {
     using namespace dtsx_decode;
+    if (argc > 1 && std::strcmp(argv[1], "--selftest") == 0) {
+        return self_test();
+    }
     _setmode(_fileno(stdin), _O_BINARY);
     _setmode(_fileno(stdout), _O_BINARY);
     std::setvbuf(stdout, nullptr, _IONBF, 0); // each frame goes out in one write, no flush needed
@@ -292,7 +327,6 @@ int main() {
     std::vector<unsigned char> input(1 << 16);
     std::vector<char> out;
     Planar pcm;
-    std::string format;
     bool failing = false;
     int n;
     // _read returns what the pipe has instead of waiting for a full buffer
@@ -311,10 +345,6 @@ int main() {
                     write_frame(pcm, decoder->active(), rate, out);
                 }
                 failing = false;
-                if (!decoder->format().empty() && decoder->format() != format) { // the bridge shows it in mpv
-                    format = decoder->format();
-                    std::fprintf(stderr, "objects: 0\nformat: %s\n", format.c_str()); // DTS:X objects come pre-rendered
-                }
             } catch (const std::exception& e) {
                 if (!failing) {
                     std::fprintf(stderr, "dtsx-objects: %s; restarting the decoder\n", e.what());

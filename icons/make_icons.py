@@ -3,7 +3,7 @@
 # the accent color tells them apart.
 import math
 from pathlib import Path
-from PIL import Image, ImageDraw
+from PIL import Image, ImageColor, ImageDraw
 
 SIZES = [16, 20, 24, 32, 40, 48, 64, 256]
 BG = "#1C1A19"
@@ -18,8 +18,7 @@ HEADER = [55, 83, 110, 138]
 SS = 8  # supersampling
 
 
-def rgb(h):
-    return tuple(int(h[i:i + 2], 16) for i in (1, 3, 5))
+rgb = ImageColor.getrgb
 
 
 def mix(a, b, t):

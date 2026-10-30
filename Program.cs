@@ -125,6 +125,7 @@ static class Program {
                 Stream input = new BufferedStream(pipe, 16384);
                 try {
                     WaveFormat format = WaveFormat.Read(input);
+                    objectBased = false; // until a decoder says so
                     if (OpenBitstream(format, ref input) is (Codec codec, Stream bitstream)) {
                         Log($"mpv connected: {codec} passthrough");
                         inputName = codec switch {
@@ -132,7 +133,6 @@ static class Program {
                             Codec.TrueHd => "TrueHD",
                             _ => "DTS",
                         };
-                        objectBased = false; // until the decoder says so
                         passthrough = true;
                         try {
                             Pump(Chunks(codec, bitstream));
@@ -148,7 +148,6 @@ static class Program {
                     } else if (format.SampleRate == sampleRate && format.Bits is 8 or 16 or 32) {
                         Log($"mpv connected: PCM {format}");
                         inputName = "PCM";
-                        objectBased = false;
                         Pump(PcmSource.Read(input, format, blockSize));
                     } else {
                         Console.WriteLine($"Unsupported PCM {format}: set audio-samplerate={sampleRate} in mpv");
@@ -189,6 +188,9 @@ static class Program {
     /// </summary>
     static volatile bool objectBased;
 
+    /// <summary>
+    /// Hand what plays to mpv (user-data/atmosbridge). Called from the render thread, sent from the thread pool.
+    /// </summary>
     static void Report(string text) {
         reported = text;
         // IPC writes can block: never on the render thread. Work items may run out of order, each sends the latest.
@@ -655,7 +657,7 @@ static class Program {
         int handledFlush = flushRequests;
         long periods = 0, underruns = 0;
         float maxHeight = 0; // highest audible object since the last status line
-        (string, bool, int, int, int) shown = default; // stream and layout in the last Report
+        (string Name, bool Objects, int Active, int Inputs, int Lfe) shown = default; // stream and layout in the last Report
 
         // Slot of each input channel/object: LFE -> 0, others -> 1, 2, ... (-1 when out of objects)
         int Slot(Chunk chunk, int index) {
@@ -762,11 +764,18 @@ static class Program {
             // it left would reach the next mpv as a stale report. Objects only where the stream has them; channels at
             // speaker positions (they go out as dynamic objects too) as their layout, e.g. "7.1.4 (12 channels)".
             if (consume && current != null && sessionActive) {
-                int inputs = current.Lfe.Count(x => !x), active = Math.Min(inputs, slots.Count - 1);
-                int lfe = current.Lfe.Length - inputs;
+                int inputs = 0, heights = 0;
+                for (int i = 0; i < current.Lfe.Length; i++) {
+                    if (!current.Lfe[i]) {
+                        inputs++;
+                        // ponytail: height by position (y > 0.5), not by channel label; fine for speaker beds, pass the
+                        // label from the decoders if a layout ever puts a height speaker lower
+                        heights += current.Positions[i].Y > .5f ? 1 : 0;
+                    }
+                }
+                int active = Math.Min(inputs, slots.Count - 1), lfe = current.Lfe.Length - inputs;
                 if (reported == null || (inputName, objectBased, active, inputs, lfe) != shown) {
                     shown = (inputName, objectBased, active, inputs, lfe);
-                    int heights = Enumerable.Range(0, current.Lfe.Length).Count(i => !current.Lfe[i] && current.Positions[i].Y > .5f);
                     string layout = objectBased
                         ? $"{active} objects{(lfe > 0 ? " + LFE" : "")}"
                         : $"{inputs - heights}.{lfe}{(heights > 0 ? $".{heights}" : "")} ({inputs + lfe} channel{(inputs + lfe == 1 ? "" : "s")})";

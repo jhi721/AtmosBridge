@@ -88,6 +88,8 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "selftest failed ($($p.ExitCode))" }
           if (-not (Test-Path publish/thd-objects.exe)) { throw 'thd-objects.exe missing from publish' }
           if (-not (Test-Path publish/dtsx-objects.exe)) { throw 'dtsx-objects.exe missing from publish' }
+          publish/dtsx-objects.exe --selftest
+          if ($LASTEXITCODE -ne 0) { throw "dtsx-objects selftest failed ($LASTEXITCODE)" }
 
       # Measured on windows-latest (70 MB payload): lzma2/fast 2 threads 4.6 s / 29 MB, lzma2/max 1 thread 24 s / 24.9 MB,
       # max 2 threads 18 s / 25 MB (4 threads no faster). Releases get the small file, every other build the fast one.

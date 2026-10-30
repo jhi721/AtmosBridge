@@ -24,7 +24,7 @@ $block = @(
 )
 
 # Adds ($Action add) or drops the marked block in one mpv config file; first add keeps a .bak-atmosbridge copy
-function Update-Block([string]$File, [string[]]$Lines) {
+function Update-Block([string]$Action, [string]$File, [string[]]$Lines) {
     if (-not (Test-Path -LiteralPath $File)) {
         if ($Action -eq 'remove') { return }
         New-Item -ItemType Directory -Force (Split-Path $File) | Out-Null
@@ -55,16 +55,16 @@ function Update-Block([string]$File, [string[]]$Lines) {
 }
 
 # The block opens with [default], so it is safe after any profile section; later options override earlier ones
-Update-Block $Path $block
+Update-Block $Action $Path $block
 
 # i shows mpv's stats and the bridge's "what plays" line together (input.conf: the last binding of a key wins)
-Update-Block (Join-Path (Split-Path $Path) 'input.conf') @(
+Update-Block $Action (Join-Path (Split-Path $Path) 'input.conf') @(
     $begin
     'i script-binding stats/display-stats; script-binding atmosbridge/info'
     $end
 )
 
-# Companion script (skips passthrough for 1-2 channel AC-3/E-AC-3), next to mpv.conf in scripts\
+# Companion script atmosbridge.lua (what mpv passes through, pcm AO options, the i overlay), next to mpv.conf in scripts\
 $script = Join-Path (Split-Path $Path) 'scripts\atmosbridge.lua'
 if ($Action -eq 'add') {
     New-Item -ItemType Directory -Force (Split-Path $script) | Out-Null
