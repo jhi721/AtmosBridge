@@ -45,6 +45,14 @@ tiny Catmull-Rom resampling correction (±0.2 % max, typically a few hundred ppm
 the drift between mpv's clock and the DAC clock. Without video mpv writes as fast as the bridge
 reads, so the queue is capped at 2.5× latency and no correction is applied.
 
+`video-sync=display-resample` can't work as is on the untimed AO: mpv sees no output delay and throttles by whole
+audio frames, so its A/V difference swings by up to a frame and display sync keeps dropping and repeating frames.
+`atmosbridge.lua` switches any such `display-*` mode to `display-resample-desync` while the pcm AO is active
+(vsync-locked frames and resampled audio as before, without mpv's A/V correction, which the throttle and the bridge's
+drift control make redundant), and back when mpv plays elsewhere. Passthrough never used it: mpv skips
+display-resample for spdif. It also turns `audio-stream-silence` off when `ao` starts with `pcm`: mpv would write
+silence into the untimed AO as fast as it takes it while paused, and the bridge would play it after resume.
+
 Over mpv's JSON IPC (`input-ipc-server`) the bridge freezes the output on pause and flushes it on
 seek, then prebuffers again. Without IPC it still plays, but pause/seek leave ~0.1 s of stale audio.
 

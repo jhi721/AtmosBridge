@@ -81,6 +81,35 @@ mp.add_hook("on_preloaded", 50, function()
     end
 end)
 
+-- audio-stream-silence: while paused (and before playback starts) mpv writes silence to an untimed AO as fast as it
+-- takes it (GBs into a file); the bridge would queue it and play everything after resume that much later. It is read
+-- when the AO opens, too late to change once the pcm AO is up (ao-reload then loses the audio), so turn it off up
+-- front when the bridge comes first in the ao list. The WASAPI fallback goes without it.
+if (mp.get_property("ao") or ""):match("^pcm") and mp.get_property_bool("audio-stream-silence") then
+    mp.set_property_bool("audio-stream-silence", false)
+    mp.msg.info("audio-stream-silence off: AtmosBridge's pcm AO would get silence as fast as it takes it")
+end
+
+-- video-sync=display-*: display sync judges A/V sync from the pcm AO, which reports no delay and is throttled by whole
+-- audio frames, so av_diff swings by up to a frame and display sync drops and repeats frames (jitter). The throttle
+-- already keeps audio in step with video and the bridge corrects the drift to the DAC, so drop only mpv's correction:
+-- display-resample-desync keeps the vsync-locked frames and resampled audio. Passthrough is unaffected either way (mpv
+-- skips display-resample for spdif). The configured mode comes back once mpv plays elsewhere.
+local configured_sync -- while replaced
+mp.observe_property("current-ao", "string", function(_, ao)
+    if ao == "pcm" and not configured_sync then
+        local sync = mp.get_property("video-sync")
+        if sync:match("^display%-") and not sync:match("desync$") then
+            configured_sync = sync
+            mp.set_property("video-sync", "display-resample-desync")
+            mp.msg.info(("video-sync=%s -> display-resample-desync while audio goes to AtmosBridge"):format(sync))
+        end
+    elseif ao and ao ~= "pcm" and configured_sync then
+        mp.set_property("video-sync", configured_sync)
+        configured_sync = nil
+    end
+end)
+
 mp.register_script_message("atmosbridge-decode", function(list)
     if decode_in_mpv(split(list), "bridge can't decode " .. list) then
         -- the new audio-spdif applies when the decoder reopens: reselect the track, both switches in one command so
