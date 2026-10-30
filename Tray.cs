@@ -9,6 +9,7 @@ namespace AtmosBridge;
 static class Tray {
     public static void Start() {
         var thread = new Thread(() => {
+            Application.SetColorMode(SystemColorMode.System); // dark menu when Windows apps are dark
             var menu = new ContextMenuStrip();
             // The exe's own icon (ApplicationIcon) at the small size, not the 32 px one scaled down
             using var icon = new NotifyIcon {
