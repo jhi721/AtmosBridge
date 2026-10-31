@@ -93,8 +93,9 @@ the bridge. A choice is saved in `%LOCALAPPDATA%\AtmosBridge\device.txt` and use
 not given; picking one reopens the spatial stream while mpv plays on. Auto re-checks every 3 s, so it moves back to the
 default endpoint once spatial sound is on there again, or to a new default device.
 
-mpv can't scale a passthrough bitstream, so the bridge applies mpv's volume and mute to it (mpv's cubic curve, capped
-at 100%: above that Windows takes no more gain). PCM arrives already scaled by mpv.
+mpv can't scale a passthrough bitstream, so the bridge applies mpv's volume and mute to it (mpv's cubic curve). Above 100%
+the samples themselves are scaled, since an object's volume stops at 1; mpv's `--volume-max` (130 by default) sets
+the ceiling. PCM arrives already scaled by mpv.
 
 ## Fallbacks
 

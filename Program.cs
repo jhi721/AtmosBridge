@@ -719,13 +719,22 @@ static class Program {
                 buffers.Add(buffer);
             }
 
+            // SetVolume takes 0..1, so mpv volume above 100% on a passthrough stream scales the samples instead;
+            // float overs go to the Windows mix, which limits them at the endpoint
+            float gain = passthrough ? MpvIpc.Gain : 1, boost = Math.Max(gain, 1);
             int written = 0;
             while (consume && written < frames && current != null) {
                 int n = Math.Min((int)frames - written, current.Length - currentPos);
                 for (int i = 0; i < current.Samples.Length; i++) {
                     int slot = Slot(current, i);
                     if (slot >= 0) {
-                        current.Samples[i].AsSpan(currentPos, n).CopyTo(new Span<float>((float*)buffers[slot] + written, n));
+                        var dst = new Span<float>((float*)buffers[slot] + written, n);
+                        current.Samples[i].AsSpan(currentPos, n).CopyTo(dst);
+                        if (boost > 1) {
+                            for (int s = 0; s < n; s++) {
+                                dst[s] *= boost;
+                            }
+                        }
                     }
                 }
                 written += n;
@@ -743,8 +752,6 @@ static class Program {
             Interlocked.Add(ref buffered, -written);
 
             if (consume && current != null) {
-                // ponytail: SetVolume takes 0..1, so mpv volume above 100% doesn't boost a passthrough stream
-                float gain = passthrough ? Math.Min(MpvIpc.Gain, 1) : 1;
                 for (int i = 0; i < current.Samples.Length; i++) {
                     int slot = Slot(current, i);
                     if (slot > 0) {
@@ -755,7 +762,7 @@ static class Program {
                         }
                     }
                     if (slot >= 0) {
-                        slots[slot].SetVolume(Math.Min(current.Volumes[i] * gain, 1));
+                        slots[slot].SetVolume(Math.Min(current.Volumes[i] * Math.Min(gain, 1), 1));
                     }
                 }
             }
