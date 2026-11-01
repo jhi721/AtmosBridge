@@ -112,8 +112,18 @@ fn main() -> std::io::Result<()> {
             return Ok(());
         }
         extractor.push_bytes(&input[..n]);
-        for frame in extractor.by_ref() {
+        while let Some(frame) = extractor.next() {
             let Ok(frame) = frame else { continue }; // extractor resyncs on its own
+            // truehd 0.7.2 bug: a zero length field that passes the parity check (seek splice, damage) yields an empty
+            // frame without consuming it, forever. The extractor has no skip: start a fresh one at the next major sync.
+            if frame.data.is_empty() {
+                eprintln!("thd-objects: empty access unit; resuming at next major sync");
+                extractor = Extractor::default();
+                parser.reset_for_next_major_sync();
+                decoder.reset_for_next_major_sync();
+                resyncing = true;
+                break;
+            }
             let decoded = parser
                 .parse(&frame)
                 .and_then(|au| decoder.decode_presentations(&au, &required));
