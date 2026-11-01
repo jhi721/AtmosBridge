@@ -146,8 +146,8 @@ sealed class SpatialOutput : IDisposable {
     }
 
     /// <summary>
-    /// The endpoint auto mode plays to: the default one if spatial sound is on there, else the first active endpoint that
-    /// has it (null: none).
+    /// The endpoint auto mode plays to: Windows' default one, if spatial sound is on there (null: not, mpv plays to it
+    /// itself). Never another endpoint: it would take the sound away from the speakers the user picked in Windows.
     /// </summary>
     public static string AutoDevice() {
         var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
@@ -155,7 +155,7 @@ sealed class SpatialOutput : IDisposable {
             device.GetId(out string id);
             return id;
         }
-        return ActiveEndpoints().FirstOrDefault(e => Spatial(e.Device).MaxDynamic > 0).Id;
+        return null;
     }
 
     /// <summary>

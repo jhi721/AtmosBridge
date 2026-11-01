@@ -90,8 +90,8 @@ i script-binding stats/display-stats; script-binding atmosbridge/info
 
 The tray icon lists the render endpoints (spatial sound on or off, the one playing marked) next to **Auto**, and exits
 the bridge. A choice is saved in `%LOCALAPPDATA%\AtmosBridge\device.txt` and used on the next start when `--device` is
-not given; picking one reopens the spatial stream while mpv plays on. Auto re-checks every 3 s, so it moves back to the
-default endpoint once spatial sound is on there again, or to a new default device.
+not given; picking one reopens the spatial stream while mpv plays on. Auto follows Windows' default device (re-checked
+every 3 s): the bridge plays there while spatial sound is on, and steps aside for mpv while it's off (see Fallbacks).
 
 mpv can't scale a passthrough bitstream, so the bridge applies mpv's volume and mute to it (mpv's cubic curve). Above 100%
 the samples themselves are scaled, since an object's volume stops at 1; mpv's `--volume-max` (130 by default) sets
@@ -106,7 +106,7 @@ the ceiling. PCM arrives already scaled by mpv.
   bridge sends `script-message atmosbridge-decode <codecs>` over IPC; the script drops them from `audio-spdif` for
   this file (mpv reopens its decoder and AO on the change), the bridge keeps the pipe flowing meanwhile and takes the
   PCM on mpv's reconnect. A hand-written mpv.conf without `atmosbridge.lua` gets no such fallback (the stream stays silent).
-- No spatial sound (off on every endpoint, or on the one picked in the tray; device gone, exclusive app), or the
+- No spatial sound (off on the default device in Auto, or on the one picked in the tray; device gone, exclusive app), or the
   bridge exits from the tray: it closes its pipe, sets `user-data/atmosbridge-ready=no` and sends `ao-reload`, so mpv
   plays through WASAPI as without the bridge. `audio-spdif` is only for the bridge: while it isn't ready the script
   empties it, mpv decodes everything (a bitstream the endpoint can't take would leave mpv silent: its PCM fallback
@@ -132,7 +132,7 @@ bin\Release\net10.0-windows\AtmosBridge.exe --device {5384faff-9e6b-4060-8de7-b7
 
 | Option | Default | |
 |---|---|---|
-| `--device` | tray choice, else auto | render endpoint id (`mpv --audio-device=help`, part after `wasapi/`). Auto: the default endpoint if spatial sound is on there, else the first active endpoint that has it |
+| `--device` | tray choice, else auto | render endpoint id (`mpv --audio-device=help`, part after `wasapi/`). Auto: Windows' default endpoint, while spatial sound is on there |
 | `--pipe` | `atmos` | audio pipe (`ao-pcm-file=\\.\pipe\atmos`) |
 | `--ipc` | `mpv-atmos` | mpv IPC pipe (`input-ipc-server=\\.\pipe\mpv-atmos`) |
 | `--latency` | `0.1` | buffer cushion in seconds |

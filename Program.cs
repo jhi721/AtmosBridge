@@ -660,11 +660,11 @@ static class Program {
                 }
                 MpvIpc.Ready = true;
                 CheckAoSoon(); // mpv may be playing elsewhere while the output was missing
-                // Auto mode re-picks every 3 s: back to the headphones once their spatial sound is on again (the fallback
-                // endpoint was taken while it was off), or onto a new default device.
+                // Auto mode follows Windows' default device, re-checked every 3 s: a new default reopens there, or hands
+                // playback back to mpv (which plays to the default itself) when spatial sound is off on it.
                 // ponytail: polling, Windows has no notification for spatial sound being switched on
                 using var follow = deviceId == null ? new Timer(_ => {
-                    if (SpatialOutput.AutoDevice() is string id && id != output.DeviceId) {
+                    if (SpatialOutput.AutoDevice() != output.DeviceId) {
                         reopen = true;
                     }
                 }, null, 3000, 3000) : null;
