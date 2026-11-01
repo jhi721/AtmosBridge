@@ -105,6 +105,10 @@ static class Program {
             if (outputReady && !sessionActive && MpvIpc.PcmFirst && MpvIpc.CurrentAo is "pcm" or "wasapi") {
                 Log($"mpv plays to {MpvIpc.CurrentAo} without the bridge: reopening its audio output");
                 MpvIpc.Command("ao-reload");
+            } else if (!outputReady && !sessionActive && MpvIpc.CurrentAo == "pcm") {
+                // No spatial output and mpv still on a dead pipe (a previous bridge's): the reload finds no pipe, goes to WASAPI
+                Log("mpv plays to a dead pipe: handing playback back to mpv");
+                MpvIpc.Command("ao-reload");
             }
         });
         MpvIpc.AoChanged += CheckAoSoon;
@@ -649,7 +653,8 @@ static class Program {
             if (wasReady) {
                 MpvIpc.Ready = false;
             }
-            if (wasReady && sessionActive) {
+            // CurrentAo too: mpv may have connected an instant before sessionActive is set
+            if (wasReady && (sessionActive || MpvIpc.CurrentAo == "pcm")) {
                 Log("No spatial output: handing playback back to mpv");
                 MpvIpc.Command("ao-reload");
             }
