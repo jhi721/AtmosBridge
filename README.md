@@ -104,15 +104,21 @@ the ceiling. PCM arrives already scaled by mpv.
   decodes it and the bridge gets PCM.
 - Any passthrough stream a decoder still fails on (e.g. after a manual track switch, TrueHD above 48 kHz): the
   bridge sends `script-message atmosbridge-decode <codecs>` over IPC; the script drops them from `audio-spdif` for
-  this file and reselects the track, the bridge keeps the pipe flowing meanwhile and takes the PCM on mpv's
-  reconnect. A hand-written mpv.conf without `atmosbridge.lua` gets no such fallback (the stream stays silent).
-- mpv started before the bridge (fell back to WASAPI), or the bridge restarted mid-file: once the bridge has a
-  spatial output and sees mpv over IPC, it sends `ao-reload` so mpv reopens its AO and lands on the pipe again.
-- No spatial sound (off on every endpoint, or on the one picked in the tray; device gone, exclusive app): the bridge
-  closes its pipe, sends `ao-reload` and sets `user-data/atmosbridge-ready=no`, so mpv plays through WASAPI as without
-  the bridge (its own passthrough or decoding; `atmosbridge.lua` leaves `audio-spdif` alone). Once spatial sound is
-  on again, mpv is moved back onto the pipe (see the next point).
-- Bridge not running at all: `ao=pcm,wasapi` plays normally through WASAPI, without the bridge's `audio-delay`.
+  this file (mpv reopens its decoder and AO on the change), the bridge keeps the pipe flowing meanwhile and takes the
+  PCM on mpv's reconnect. A hand-written mpv.conf without `atmosbridge.lua` gets no such fallback (the stream stays silent).
+- No spatial sound (off on every endpoint, or on the one picked in the tray; device gone, exclusive app), or the
+  bridge exits from the tray: it closes its pipe, sets `user-data/atmosbridge-ready=no` and sends `ao-reload`, so mpv
+  plays through WASAPI as without the bridge. `audio-spdif` is only for the bridge: while it isn't ready the script
+  empties it, mpv decodes everything (a bitstream the endpoint can't take would leave mpv silent: its PCM fallback
+  opens the decoder but no AO).
+- mpv started before the bridge (fell back to WASAPI), spatial sound back on, or the bridge restarted mid-file: once
+  the bridge has a spatial output it opens the pipe, sets `user-data/atmosbridge-ready=yes` (the script restores
+  `audio-spdif`) and, seeing mpv elsewhere over IPC, sends `ao-reload` so mpv lands on the pipe again. mpv still on a
+  dead pipe (bridge restarted while spatial sound is off) gets an `ao-reload` too, to WASAPI.
+- Bridge not running at all: `ao=pcm,wasapi` plays through WASAPI, decoded by mpv (the script waits up to 0.3 s per
+  file for the bridge's flag, then empties `audio-spdif`), without the bridge's `audio-delay`. A bridge that was killed
+  (crash, Task Manager) leaves `ready=yes` behind: that mpv stays silent on its dead pipe, and on passthrough tracks of
+  later files, until the bridge runs again or mpv restarts.
 
 ## Run
 

@@ -44,6 +44,7 @@ static class Tray {
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Exit", null, (_, _) => {
             icon.Visible = false;
+            Program.HandBack("Exiting: handing playback back to mpv");
             Environment.Exit(0); // helpers end with their stdin
         }));
     }

@@ -1,6 +1,9 @@
 -- AtmosBridge helper for mpv (installed by the AtmosBridge installer, removed on uninstall).
 --
 -- Shows what the bridge plays (bottom of this file) and decides which audio mpv passes through to the bridge and which it decodes itself:
+-- * audio-spdif is only for the bridge. While it has no spatial output (spatial sound off: user-data/atmosbridge-ready
+--   false) or isn't there at all, mpv plays through WASAPI as without the bridge and decodes everything: a bitstream
+--   the endpoint can't take would leave mpv silent (its PCM fallback opens the decoder but no AO).
 -- * Before a file's decoder opens: the bridge's E-AC-3 decoder (Cavern) handles 5.1/7.1 and Atmos (JOC) but not
 --   stereo or mono E-AC-3, nor AC-3 at all (Cavern 2.1.0 misparses AC-3 coupling). Those never carry Atmos anyway, so
 --   for such a track drop them from audio-spdif: mpv's decoder gives the same channels.
@@ -15,28 +18,6 @@ local function split(list)
         out[#out + 1] = item
     end
     return out
-end
-
--- Remove codecs from audio-spdif for this file; true if anything changed
-local function decode_in_mpv(codecs, why)
-    local drop = {}
-    for _, c in ipairs(codecs) do
-        drop[c] = true
-    end
-    local all = split(mp.get_property("audio-spdif"))
-    local kept = {}
-    for _, c in ipairs(all) do
-        if not drop[c] then
-            kept[#kept + 1] = c
-        end
-    end
-    if #kept == #all then
-        return false
-    end
-    local rest = table.concat(kept, ",")
-    mp.set_property("file-local-options/audio-spdif", rest)
-    mp.msg.info(("%s: decoded by mpv, not passed to AtmosBridge (audio-spdif=%s)"):format(why, rest))
-    return true
 end
 
 -- The audio track mpv is about to pick (aid=auto: simplified mpv rules), before track selection runs
@@ -75,31 +56,70 @@ local function predicted_audio_track()
     return audio[1]
 end
 
-local function keep_from_bridge(t)
-    local channels = t and t["demux-channel-count"] or 0
-    if t and t.codec == "ac3" then
-        return decode_in_mpv({ "ac3" }, "ac3")
-    elseif t and t.codec == "eac3" and channels >= 1 and channels <= 2 then
-        return decode_in_mpv({ "ac3", "eac3" }, ("%s %d ch"):format(t.codec, channels))
-    end
-    return false
+local file_spdif -- audio-spdif as configured, taken at this file's start
+local refused = {} -- codecs the bridge sent back for this file (atmosbridge-decode)
+
+local function ready()
+    return mp.get_property_native("user-data/atmosbridge-ready") == true
 end
 
--- user-data/atmosbridge-ready: false while the bridge has no spatial output (spatial sound off). Its pipe is closed then,
--- mpv plays through WASAPI as without the bridge, so audio-spdif stays as configured. Unset (bridge not connected
--- yet, or not running) filters as before: the bridge may still take this file.
-mp.add_hook("on_preloaded", 50, function()
-    if mp.get_property_native("user-data/atmosbridge-ready") ~= false then
-        keep_from_bridge(predicted_audio_track())
+-- Set audio-spdif for track t: the configured list minus what the bridge can't take, or nothing without the bridge.
+-- mpv reopens the decoder and AO on the change by itself (a track reselect on top would reopen the AO twice, the second
+-- time before the bridge has its next pipe instance up).
+local function apply(t, why)
+    local drop = {}
+    for c in pairs(refused) do
+        drop[c] = true
     end
+    local channels = t and t["demux-channel-count"] or 0
+    if t and t.codec == "ac3" then
+        drop.ac3 = true
+    elseif t and t.codec == "eac3" and channels >= 1 and channels <= 2 then
+        drop.ac3, drop.eac3 = true, true
+    end
+    local kept = {}
+    for _, c in ipairs(ready() and split(file_spdif) or {}) do
+        if not drop[c] then
+            kept[#kept + 1] = c
+        end
+    end
+    local spdif = table.concat(kept, ",")
+    if spdif == mp.get_property("audio-spdif") then
+        return
+    end
+    mp.set_property("file-local-options/audio-spdif", spdif)
+    mp.msg.info(("%s: audio-spdif=%s"):format(why, spdif))
+end
+
+-- The bridge sets the flag right after it connects to the IPC, normally before the first file gets here: unset, wait
+-- for it briefly, then go on as without the bridge (not running)
+mp.add_hook("on_preloaded", 50, function(hook)
+    file_spdif = mp.get_property("audio-spdif")
+    refused = {}
+    local function go()
+        apply(predicted_audio_track(), ready() and "AtmosBridge" or "no AtmosBridge output, decoded by mpv")
+    end
+    if mp.get_property_native("user-data/atmosbridge-ready") ~= nil then
+        return go()
+    end
+    hook:defer()
+    local waited = 0
+    local timer
+    timer = mp.add_periodic_timer(0.05, function()
+        waited = waited + 0.05
+        if mp.get_property_native("user-data/atmosbridge-ready") ~= nil or waited >= 0.3 then
+            timer:kill()
+            go()
+            hook:cont()
+        end
+    end)
 end)
 
--- Spatial sound switched on mid-file: the bridge reloads mpv's AO onto its pipe next, filter the playing track first
--- (the reselect reopens the decoder with the new audio-spdif)
-mp.observe_property("user-data/atmosbridge-ready", "native", function(_, ready)
-    local aid = mp.get_property_number("aid")
-    if ready == true and aid and keep_from_bridge(mp.get_property_native("current-tracks/audio")) then
-        mp.command(("no-osd set aid no; no-osd set aid %d"):format(aid))
+-- Spatial sound switched off or on mid-file: the playing track gets the matching audio-spdif (the bridge reloads mpv's
+-- AO too, for tracks where that changes nothing)
+mp.observe_property("user-data/atmosbridge-ready", "native", function(_, r)
+    if file_spdif and r ~= nil and mp.get_property("path") then
+        apply(mp.get_property_native("current-tracks/audio"), r and "AtmosBridge ready" or "AtmosBridge has no spatial output, decoded by mpv")
     end
 end)
 
@@ -136,14 +156,10 @@ mp.observe_property("current-ao", "string", function(_, ao)
 end)
 
 mp.register_script_message("atmosbridge-decode", function(list)
-    if decode_in_mpv(split(list), "bridge can't decode " .. list) then
-        -- the new audio-spdif applies when the decoder reopens: reselect the track, both switches in one command so
-        -- mpv doesn't see "no audio" in between (an audio-only file would end)
-        local aid = mp.get_property_number("aid")
-        if aid then
-            mp.command(("no-osd set aid no; no-osd set aid %d"):format(aid))
-        end
+    for _, c in ipairs(split(list)) do
+        refused[c] = true
     end
+    apply(mp.get_property_native("current-tracks/audio"), "bridge can't decode " .. list)
 end)
 
 -- What the bridge actually plays ("TrueHD Atmos → 15 objects + LFE", "DTS-HD MA 5.1 → 5.1 (6 channels)"): it sets user-data/atmosbridge once audio reaches the

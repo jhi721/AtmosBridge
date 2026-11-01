@@ -86,6 +86,7 @@ static class Program {
             deviceId = File.ReadAllText(choicePath).Trim() is { Length: > 0 } saved ? saved : null;
         }
         ChosenDevice = deviceId;
+        audioPipe = file == null ? pipeName : null;
         var renderThread = new Thread(RenderSupervisor) { Priority = ThreadPriority.Highest, IsBackground = true };
         renderThread.Start();
         Tray.Start();
@@ -120,11 +121,10 @@ static class Program {
             // The next instance exists before the current session ends: mpv reopens its AO within milliseconds (track
             // change, decode fallback) and falls back to WASAPI if no pipe instance is there to take the reconnect.
             // Only while a spatial output is open: without one mpv's pcm AO finds no pipe and plays through WASAPI itself.
-            NamedPipeServerStream Listen() => new(pipeName, PipeDirection.In, 2, PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 4096, 0);
             while (running) {
                 NamedPipeServerStream next;
                 lock (pipeLock) {
-                    next = standby ??= outputReady ? Listen() : null;
+                    next = standby;
                 }
                 if (next == null) {
                     Thread.Sleep(100);
@@ -196,6 +196,9 @@ static class Program {
     /// together with outputReady, so no instance is created after the supervisor closed it.
     /// </summary>
     static NamedPipeServerStream standby;
+    static string audioPipe; // null with --file
+
+    static NamedPipeServerStream Listen() => new(audioPipe, PipeDirection.In, 2, PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 4096, 0);
     static readonly object pipeLock = new();
 
     /// <summary>
@@ -264,6 +267,24 @@ static class Program {
     }
 
     static void CheckAoSoon() => aoCheck?.Change(1000, Timeout.Infinite);
+
+    /// <summary>
+    /// Close the pipe to new connections and hand playback to mpv (no spatial output, or exit): ready=false has
+    /// atmosbridge.lua decode everything, the AO reload finds no pipe and plays through WASAPI as without the bridge.
+    /// </summary>
+    internal static void HandBack(string why) {
+        lock (pipeLock) {
+            outputReady = false;
+            standby?.Dispose();
+            standby = null;
+        }
+        MpvIpc.Ready = false;
+        // CurrentAo too: mpv may have connected an instant before sessionActive is set
+        if (sessionActive || MpvIpc.CurrentAo == "pcm") {
+            Log(why);
+            MpvIpc.Command("ao-reload");
+        }
+    }
 
     /// <summary>
     /// Discard the pipe at its real byte rate until mpv closes it (at most 5 s).
@@ -395,7 +416,17 @@ static class Program {
             Chunk output = resampler.Process(chunk, ratio);
             Interlocked.Add(ref buffered, output.Length);
             try {
-                queue.Add(output);
+                // Paused with a full queue: mpv refills its AO after a seek or AO reopen while paused. Blocking here
+                // blocks mpv's AO thread with its lock held, which mpv's unpause waits for (deadlock): drop the oldest
+                // instead, the render loop trims to the cushion on resume anyway
+                while (!queue.TryAdd(output, MpvIpc.Paused ? 0 : 50)) {
+                    if (!running) {
+                        return;
+                    }
+                    if (MpvIpc.Paused && queue.TryTake(out Chunk old)) {
+                        Interlocked.Add(ref buffered, -old.Length);
+                    }
+                }
             } catch (InvalidOperationException) {
                 return; // CompleteAdding on exit
             }
@@ -623,7 +654,11 @@ static class Program {
                 if (output.SampleRate != sampleRate) {
                     Console.WriteLine($"Warning: spatial engine runs at {output.SampleRate} Hz, bridge assumes {sampleRate} Hz");
                 }
-                outputReady = MpvIpc.Ready = true;
+                lock (pipeLock) { // the pipe exists before mpv hears it may come: its reselect opens the AO at once
+                    outputReady = true;
+                    standby ??= audioPipe == null ? null : Listen();
+                }
+                MpvIpc.Ready = true;
                 CheckAoSoon(); // mpv may be playing elsewhere while the output was missing
                 // Auto mode re-picks every 3 s: back to the headphones once their spatial sound is on again (the fallback
                 // endpoint was taken while it was off), or onto a new default device.
@@ -642,21 +677,10 @@ static class Program {
                 Log($"Spatial output unavailable: {e.Message}");
             }
             OpenDevice = null;
-            bool wasReady = outputReady;
-            lock (pipeLock) {
-                outputReady = playing = false;
-                standby?.Dispose();
-                standby = null;
-            }
-            // No spatial sound (off, device gone, exclusive app): mpv reopens its AO, finds no pipe and plays through
-            // WASAPI with its own passthrough or decoding; the AO check brings it back once an output opens again
-            if (wasReady) {
-                MpvIpc.Ready = false;
-            }
-            // CurrentAo too: mpv may have connected an instant before sessionActive is set
-            if (wasReady && (sessionActive || MpvIpc.CurrentAo == "pcm")) {
-                Log("No spatial output: handing playback back to mpv");
-                MpvIpc.Command("ao-reload");
+            playing = false;
+            // No spatial sound (off, device gone, exclusive app); the AO check brings mpv back once an output opens again
+            if (outputReady) {
+                HandBack("No spatial output: handing playback back to mpv");
             }
             while (queue.TryTake(out _)) { }
             Interlocked.Exchange(ref buffered, 0);
@@ -694,7 +718,7 @@ static class Program {
         var buffers = new List<IntPtr>();
         Chunk current = null;
         int currentPos = 0;
-        bool prebuffering = true;
+        bool prebuffering = true, wasPaused = false;
         int handledFlush = flushRequests;
         long periods = 0, underruns = 0;
         float maxHeight = 0; // highest audible object since the last status line
@@ -736,7 +760,26 @@ static class Program {
             if (prebuffering && Interlocked.Read(ref buffered) >= targetSamples) {
                 prebuffering = false;
             }
-            bool consume = !prebuffering && !MpvIpc.Paused;
+            bool paused = MpvIpc.Paused;
+            // Resumed: mpv counts what it wrote as played, so audio written while paused beyond the cushion (its AO
+            // refill after a seek or reopen) would play that much late
+            if (wasPaused && !paused && Interlocked.Read(ref buffered) > targetSamples * 3 / 2) {
+                Log($"Resumed with {Interlocked.Read(ref buffered) * 1000 / sampleRate} ms queued: trimming to the cushion");
+                while (Interlocked.Read(ref buffered) > targetSamples * 3 / 2) {
+                    int n;
+                    if (current != null) {
+                        n = current.Length - currentPos;
+                        current = null;
+                    } else if (queue.TryTake(out Chunk old)) {
+                        n = old.Length;
+                    } else {
+                        break;
+                    }
+                    Interlocked.Add(ref buffered, -n);
+                }
+            }
+            wasPaused = paused;
+            bool consume = !prebuffering && !paused;
             playing = consume;
 
             if (consume && current == null && queue.TryTake(out Chunk first)) {
