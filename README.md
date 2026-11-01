@@ -108,6 +108,10 @@ the ceiling. PCM arrives already scaled by mpv.
   reconnect. A hand-written mpv.conf without `atmosbridge.lua` gets no such fallback (the stream stays silent).
 - mpv started before the bridge (fell back to WASAPI), or the bridge restarted mid-file: once the bridge has a
   spatial output and sees mpv over IPC, it sends `ao-reload` so mpv reopens its AO and lands on the pipe again.
+- No spatial sound (off on every endpoint, or on the one picked in the tray; device gone, exclusive app): the bridge
+  closes its pipe, sends `ao-reload` and sets `user-data/atmosbridge-ready=no`, so mpv plays through WASAPI as without
+  the bridge (its own passthrough or decoding; `atmosbridge.lua` leaves `audio-spdif` alone). Once spatial sound is
+  on again, mpv is moved back onto the pipe (see the next point).
 - Bridge not running at all: `ao=pcm,wasapi` plays normally through WASAPI, without the bridge's `audio-delay`.
 
 ## Run
@@ -133,7 +137,7 @@ bin\Release\net10.0-windows\AtmosBridge.exe --device {5384faff-9e6b-4060-8de7-b7
 
 Login startup: `Startup\AtmosBridge.lnk` runs the windowless build in `dist\` (`dotnet publish -c Release -o dist
 -p:OutputType=WinExe`) with `--log %LOCALAPPDATA%\AtmosBridge\log.txt`. If the device is busy or spatial sound is
-off, it retries every 3 s and drops audio meanwhile so mpv doesn't stall.
+off, it retries every 3 s and steps aside meanwhile (see Fallbacks).
 
 ## mpv.conf
 

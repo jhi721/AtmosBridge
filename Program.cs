@@ -114,15 +114,29 @@ static class Program {
             Pump(FileChunks(file));
         } else {
             // The next instance exists before the current session ends: mpv reopens its AO within milliseconds (track
-            // change, decode fallback) and falls back to WASAPI if no pipe instance is there to take the reconnect
-            NamedPipeServerStream Listen() => new(pipeName, PipeDirection.In, 2, PipeTransmissionMode.Byte, PipeOptions.None, 4096, 0);
-            NamedPipeServerStream next = Listen();
+            // change, decode fallback) and falls back to WASAPI if no pipe instance is there to take the reconnect.
+            // Only while a spatial output is open: without one mpv's pcm AO finds no pipe and plays through WASAPI itself.
+            NamedPipeServerStream Listen() => new(pipeName, PipeDirection.In, 2, PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 4096, 0);
             while (running) {
+                NamedPipeServerStream next;
+                lock (pipeLock) {
+                    next = standby ??= outputReady ? Listen() : null;
+                }
+                if (next == null) {
+                    Thread.Sleep(100);
+                    continue;
+                }
                 Console.WriteLine($@"Waiting for mpv on \\.\pipe\{pipeName} ...");
-                next.WaitForConnection();
+                try {
+                    next.WaitForConnectionAsync().GetAwaiter().GetResult();
+                } catch (Exception e) when (e is IOException || e is ObjectDisposedException || e is OperationCanceledException) {
+                    continue; // spatial output lost: the supervisor closed the instance
+                }
                 using var pipe = next;
                 sessionActive = true;
-                next = Listen();
+                lock (pipeLock) {
+                    standby = outputReady ? Listen() : null;
+                }
                 Stream input = new BufferedStream(pipe, 16384);
                 try {
                     WaveFormat format = WaveFormat.Read(input);
@@ -172,6 +186,13 @@ static class Program {
     }
 
     static Timer aoCheck;
+
+    /// <summary>
+    /// Pipe instance waiting for mpv's next connection, null while there is no spatial output. Guarded by pipeLock
+    /// together with outputReady, so no instance is created after the supervisor closed it.
+    /// </summary>
+    static NamedPipeServerStream standby;
+    static readonly object pipeLock = new();
 
     /// <summary>
     /// The pipe carries a bitstream, which mpv's volume never touched: the render loop applies it (PCM comes scaled).
@@ -584,8 +605,8 @@ static class Program {
     }
 
     /// <summary>
-    /// Keep a spatial stream open, reopening it after failures. While there is none, drop audio in real time
-    /// so mpv keeps playing (silently) instead of stalling on the pipe.
+    /// Keep a spatial stream open, reopening it after failures. While there is none the pipe is closed to new
+    /// connections and mpv plays itself; what is still queued or arrives before mpv leaves is dropped in real time.
     /// </summary>
     static void RenderSupervisor() {
         while (running) {
@@ -598,7 +619,7 @@ static class Program {
                 if (output.SampleRate != sampleRate) {
                     Console.WriteLine($"Warning: spatial engine runs at {output.SampleRate} Hz, bridge assumes {sampleRate} Hz");
                 }
-                outputReady = true;
+                outputReady = MpvIpc.Ready = true;
                 CheckAoSoon(); // mpv may be playing elsewhere while the output was missing
                 // Auto mode re-picks every 3 s: back to the headphones once their spatial sound is on again (the fallback
                 // endpoint was taken while it was off), or onto a new default device.
@@ -617,7 +638,21 @@ static class Program {
                 Log($"Spatial output unavailable: {e.Message}");
             }
             OpenDevice = null;
-            outputReady = playing = false;
+            bool wasReady = outputReady;
+            lock (pipeLock) {
+                outputReady = playing = false;
+                standby?.Dispose();
+                standby = null;
+            }
+            // No spatial sound (off, device gone, exclusive app): mpv reopens its AO, finds no pipe and plays through
+            // WASAPI with its own passthrough or decoding; the AO check brings it back once an output opens again
+            if (wasReady) {
+                MpvIpc.Ready = false;
+            }
+            if (wasReady && sessionActive) {
+                Log("No spatial output: handing playback back to mpv");
+                MpvIpc.Command("ao-reload");
+            }
             while (queue.TryTake(out _)) { }
             Interlocked.Exchange(ref buffered, 0);
             // Retry in 3 s, dropping audio by the clock: Sleep(10) lasts ~15.6 ms at the default timer resolution, so one

@@ -75,13 +75,31 @@ local function predicted_audio_track()
     return audio[1]
 end
 
-mp.add_hook("on_preloaded", 50, function()
-    local t = predicted_audio_track()
+local function keep_from_bridge(t)
     local channels = t and t["demux-channel-count"] or 0
     if t and t.codec == "ac3" then
-        decode_in_mpv({ "ac3" }, "ac3")
+        return decode_in_mpv({ "ac3" }, "ac3")
     elseif t and t.codec == "eac3" and channels >= 1 and channels <= 2 then
-        decode_in_mpv({ "ac3", "eac3" }, ("%s %d ch"):format(t.codec, channels))
+        return decode_in_mpv({ "ac3", "eac3" }, ("%s %d ch"):format(t.codec, channels))
+    end
+    return false
+end
+
+-- user-data/atmosbridge-ready: false while the bridge has no spatial output (spatial sound off). Its pipe is closed then,
+-- mpv plays through WASAPI as without the bridge, so audio-spdif stays as configured. Unset (bridge not connected
+-- yet, or not running) filters as before: the bridge may still take this file.
+mp.add_hook("on_preloaded", 50, function()
+    if mp.get_property_native("user-data/atmosbridge-ready") ~= false then
+        keep_from_bridge(predicted_audio_track())
+    end
+end)
+
+-- Spatial sound switched on mid-file: the bridge reloads mpv's AO onto its pipe next, filter the playing track first
+-- (the reselect reopens the decoder with the new audio-spdif)
+mp.observe_property("user-data/atmosbridge-ready", "native", function(_, ready)
+    local aid = mp.get_property_number("aid")
+    if ready == true and aid and keep_from_bridge(mp.get_property_native("current-tracks/audio")) then
+        mp.command(("no-osd set aid no; no-osd set aid %d"):format(aid))
     end
 end)
 

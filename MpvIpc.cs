@@ -25,6 +25,26 @@ static class MpvIpc {
     /// </summary>
     public static float Gain => mute ? 0 : volume;
 
+    /// <summary>
+    /// The bridge has a spatial output (user-data/atmosbridge-ready): atmosbridge.lua leaves audio-spdif alone while it
+    /// is false, mpv then plays as without the bridge.
+    /// </summary>
+    public static bool Ready {
+        get => ready;
+        set {
+            ready = value;
+            lock (sendLock) {
+                try {
+                    writer?.WriteLine(ReadyJson()); // not queued: every connection starts with it
+                } catch (Exception e) when (e is IOException || e is ObjectDisposedException) {
+                }
+            }
+        }
+    }
+
+    static string ReadyJson() => JsonSerializer.Serialize(new { command = new object[] { "set_property", "user-data/atmosbridge-ready", ready } });
+
+    static volatile bool ready;
     static volatile float volume = 1;
     static volatile bool mute;
 
@@ -49,6 +69,7 @@ static class MpvIpc {
                     writer.WriteLine("""{ "command": ["observe_property", 3, "volume"] }""");
                     writer.WriteLine("""{ "command": ["observe_property", 4, "mute"] }""");
                     writer.WriteLine("""{ "command": ["observe_property", 5, "ao"] }""");
+                    writer.WriteLine(ReadyJson());
                     if (queued is (string json, long at) && Environment.TickCount64 - at < 5000) {
                         writer.WriteLine(json);
                     }
