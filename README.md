@@ -60,8 +60,9 @@ Over mpv's JSON IPC (`input-ipc-server`) the bridge freezes the output on pause 
 seek, then prebuffers again. Without IPC it still plays, but pause/seek leave ~0.1 s of stale audio.
 
 End to end (bridge cushion + Windows spatial engine + Dolby renderer) the sound leaves ~0.26 s after mpv writes
-it (`--latency` + ~0.16 s); `audio-delay=-0.26` lines it up with the picture (adjust it together with `--latency`). Measured with beep test videos and WASAPI loopback: within
--19 ... +33 ms on the PCM, E-AC-3, TrueHD and DTS paths. Pause reaches the output after ~0.23 s, resume ~0.22 s.
+it (`--latency` + ~0.16 s). The installer sets no `audio-delay`; `audio-delay=-0.26` in mpv.conf (adjust it together
+with `--latency`) lines it up with the picture, within -19 ... +33 ms on the PCM, E-AC-3, TrueHD and DTS paths
+(beep test videos, WASAPI loopback). Pause reaches the output after ~0.23 s, resume ~0.22 s.
 
 ## What's playing
 
@@ -116,7 +117,7 @@ the ceiling. PCM arrives already scaled by mpv.
   `audio-spdif`) and, seeing mpv elsewhere over IPC, sends `ao-reload` so mpv lands on the pipe again. mpv still on a
   dead pipe (bridge restarted while spatial sound is off) gets an `ao-reload` too, to WASAPI.
 - Bridge not running at all: `ao=pcm,wasapi` plays through WASAPI, decoded by mpv (the script waits up to 0.3 s per
-  file for the bridge's flag, then empties `audio-spdif`), without the bridge's `audio-delay`. A bridge that was killed
+  file for the bridge's flag, then empties `audio-spdif`). A bridge that was killed
   (crash, Task Manager) leaves `ready=yes` behind: that mpv stays silent on its dead pipe, and on passthrough tracks of
   later files, until the bridge runs again or mpv restarts.
 
@@ -154,12 +155,6 @@ ao-pcm-file=\\.\pipe\atmos
 audio-samplerate=48000        # PCM path needs the spatial engine's rate
 audio-channels=auto           # the bridge takes any layout; a fixed list would fold height channels down
 input-ipc-server=\\.\pipe\mpv-atmos
-
-# measured end-to-end latency, only when audio goes to the bridge
-[atmos-bridge-delay]
-profile-cond=get("current-ao") == "pcm"
-profile-restore=copy
-audio-delay=-0.26
 ```
 
 ## Limits
@@ -176,8 +171,8 @@ audio-delay=-0.26
   14-bit DTS (DTS-CD) stays silent. After a seek (seen over IPC) the bridge restarts the helper; without IPC the
   helper restarts on the first frame it can't decode. DTSX_decoder is experimental and licensed PolyForm
   Noncommercial 1.0.0; libdcadec is LGPL-2.1.
-- `audio-delay=-0.26` was measured with Dolby Atmos for Headphones; another spatial renderer (Windows Sonic) has
-  its own latency, fine-tune with Ctrl+plus/minus.
+- Without an `audio-delay` the sound trails the picture by ~0.26 s (measured with Dolby Atmos for Headphones; another
+  spatial renderer such as Windows Sonic has its own latency). Fine-tune with Ctrl+plus/minus.
 - Several mpv instances at once: only the first gets the IPC pipe and the audio pipe.
 - Cavern licence: free, non-commercial use. truehd/truehdd: Apache-2.0, a research implementation of TrueHD/OAMD
   "not intended for production environments or consumer playback systems" (its README); Dolby patents may apply.

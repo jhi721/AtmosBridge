@@ -15,11 +15,6 @@ $block = @(
     'audio-samplerate=48000'
     'audio-channels=auto' # the bridge takes any layout; a fixed list (7.1,5.1,...) would fold heights down
     'input-ipc-server=\\.\pipe\mpv-atmos'
-    ''
-    '[atmos-bridge-delay]'
-    'profile-cond=get("current-ao") == "pcm"'
-    'profile-restore=copy'
-    'audio-delay=-0.26' # measured end to end, see README (How timing works)
     $end
 )
 
