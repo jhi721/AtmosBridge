@@ -261,8 +261,8 @@ static class Program {
     internal static volatile string OpenDevice;
 
     /// <summary>
-    /// Another endpoint is wanted (tray choice, or auto mode now picks a different one): the render loop returns and the
-    /// supervisor reopens.
+    /// Reopen the stream (tray choice, auto mode now picks a different endpoint, or the current stream is silent): the
+    /// render loop returns and the supervisor reopens. Whoever sets it logs why.
     /// </summary>
     static volatile bool reopen;
 
@@ -679,13 +679,13 @@ static class Program {
                 // playback back to mpv (which plays to the default itself) when spatial sound is off on it.
                 // ponytail: polling, Windows has no notification for spatial sound being switched on
                 using var follow = deviceId == null ? new Timer(_ => {
-                    if (SpatialOutput.AutoDevice() != output.DeviceId) {
+                    if (!reopen && SpatialOutput.AutoDevice() != output.DeviceId) {
+                        Log("Windows default device changed: switching spatial endpoint");
                         reopen = true;
                     }
                 }, null, 3000, 3000) : null;
                 RenderLoop(output);
                 if (reopen) {
-                    Log("Switching spatial endpoint");
                     continue; // keep the queue, mpv plays on
                 }
             } catch (Exception e) {
@@ -725,6 +725,8 @@ static class Program {
     /// </summary>
     static string silentReopened;
 
+    const float Silence = 1e-4f; // sample magnitude below which a buffer counts as silent
+
     static string lastFailure; // last "Spatial output unavailable" reason logged
 
     [DllImport("avrt.dll", CharSet = CharSet.Unicode)]
@@ -747,8 +749,7 @@ static class Program {
         int handledFlush = flushRequests;
         long periods = 0, underruns = 0;
         float maxHeight = 0; // highest audible object since the last status line
-        bool verified = false; // the endpoint meter has shown this stream's sound
-        int audiblePeriods = 0; // periods with audible input before that
+        int audiblePeriods = 0; // periods with audible input until the endpoint meter has judged the stream, then -1
         (string Name, bool Objects, int Active, int Inputs, int Lfe) shown = default; // stream and layout in the last Report
 
         // Slot of each input channel/object: LFE -> 0, others -> 1, 2, ... (-1 when out of objects)
@@ -833,7 +834,7 @@ static class Program {
             // float overs go to the Windows mix, which limits them at the endpoint
             float gain = passthrough ? MpvIpc.Gain : 1, boost = Math.Max(gain, 1);
             int written = 0;
-            bool audible = false;
+            bool checkAudible = audiblePeriods >= 0 && gain > 0, audible = false;
             while (consume && written < frames && current != null) {
                 int n = Math.Min((int)frames - written, current.Length - currentPos);
                 for (int i = 0; i < current.Samples.Length; i++) {
@@ -842,7 +843,9 @@ static class Program {
                         var dst = new Span<float>((float*)buffers[slot] + written, n);
                         Span<float> src = current.Samples[i].AsSpan(currentPos, n);
                         src.CopyTo(dst);
-                        audible |= !verified && gain > 0 && src.ContainsAnyExceptInRange(-1e-4f, 1e-4f);
+                        if (checkAudible && !audible) {
+                            audible = src.ContainsAnyExceptInRange(-Silence, Silence);
+                        }
                         if (boost > 1) {
                             for (int s = 0; s < n; s++) {
                                 dst[s] *= boost;
@@ -870,7 +873,7 @@ static class Program {
                     if (slot > 0) {
                         Vector3 p = current.Positions[i] * roomScale;
                         slots[slot].SetPosition(p.X, p.Y, p.Z);
-                        if (p.Y > maxHeight && current.Samples[i].AsSpan().ContainsAnyExceptInRange(-1e-4f, 1e-4f)) {
+                        if (p.Y > maxHeight && current.Samples[i].AsSpan().ContainsAnyExceptInRange(-Silence, Silence)) {
                             maxHeight = p.Y;
                         }
                     }
@@ -886,18 +889,19 @@ static class Program {
             // once per endpoint in case some endpoint's meter misses spatial streams. The meter is before endpoint
             // volume and mute, so a muted system doesn't trigger it.
             if (audible && ++audiblePeriods % 50 == 0) {
-                if (output.Peak != 0) {
-                    verified = true;
-                    silentReopened = null;
-                } else if (audiblePeriods >= 200) {
-                    verified = true;
-                    if (silentReopened != output.DeviceId) {
+                bool heard = output.Peak != 0;
+                if (heard || audiblePeriods >= 200) {
+                    audiblePeriods = -1; // judged: stop checking this stream
+                    if (heard) {
+                        silentReopened = null;
+                    } else if (silentReopened != output.DeviceId) {
                         Log("Spatial stream silent (endpoint peak 0 while the bridge writes sound): reopening it");
                         silentReopened = output.DeviceId;
                         reopen = true;
                         return;
+                    } else {
+                        Log("Spatial stream still silent after reopening it");
                     }
-                    Log("Spatial stream still silent after reopening it");
                 }
             }
 
