@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.IO.Pipes;
 using System.Numerics;
+using System.Reflection;
 using System.Runtime.InteropServices;
 
 using Cavern;
@@ -45,7 +46,8 @@ static class Program {
     static long discardSince;
     static double ratio = 1;
 
-    static void Log(string message) => Console.WriteLine($"[{clock.Elapsed.TotalSeconds:0.00}] {message}");
+    // Wall clock to match a user's "it broke at 21:40", uptime to reason about latency and reconnect timing
+    static void Log(string message) => Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} +{clock.Elapsed.TotalSeconds:0.00}] {message}");
 
     static int Main(string[] args) {
         string pipeName = "atmos", ipcName = "mpv-atmos", deviceId = null, file = null;
@@ -57,11 +59,20 @@ static class Program {
                 case "--device": deviceId = args[++i]; break;
                 case "--file": file = args[++i]; break;
                 case "--log": // windowless runs (login startup) have no console
-                    Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(args[i + 1])));
-                    Console.SetOut(new StreamWriter(args[++i], false) { AutoFlush = true });
+                    string logPath = Path.GetFullPath(args[++i]);
+                    Directory.CreateDirectory(Path.GetDirectoryName(logPath));
+                    try { // keep the last run's log: restarting the bridge is how a user gets out of a problem
+                        File.Move(logPath, Path.ChangeExtension(logPath, ".prev" + Path.GetExtension(logPath)), true);
+                    } catch (IOException) {
+                    }
+                    var logWriter = new StreamWriter(logPath, false) { AutoFlush = true };
+                    Console.SetOut(logWriter);
+                    Console.SetError(logWriter); // both wrap it in one synchronized writer: lines don't interleave
                     break;
             }
         }
+        // Windowless runs die silently otherwise; AutoFlush puts the line on disk before the process ends
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => Log("Unhandled exception: " + e.ExceptionObject);
 
         if (args.Contains("--selftest")) {
             return SelfTest();
@@ -79,6 +90,9 @@ static class Program {
             }
             return 0;
         }
+
+        string version = typeof(Program).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        Log($"AtmosBridge {version} on {Environment.OSVersion} ({RuntimeInformation.FrameworkDescription}), args: {string.Join(' ', args)}");
 
         queue = new(Math.Max(4, targetSamples * 5 / 2 / blockSize));
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; running = false; queue.CompleteAdding(); };
@@ -130,7 +144,7 @@ static class Program {
                     Thread.Sleep(100);
                     continue;
                 }
-                Console.WriteLine($@"Waiting for mpv on \\.\pipe\{pipeName} ...");
+                Log($@"Waiting for mpv on \\.\pipe\{pipeName} ...");
                 try {
                     next.WaitForConnectionAsync().GetAwaiter().GetResult();
                 } catch (Exception e) when (e is IOException || e is ObjectDisposedException || e is OperationCanceledException) {
@@ -169,7 +183,7 @@ static class Program {
                         inputName = "PCM";
                         Pump(PcmSource.Read(input, format, blockSize));
                     } else {
-                        Console.WriteLine($"Unsupported PCM {format}: set audio-samplerate={sampleRate} in mpv");
+                        Log($"Unsupported PCM {format}: set audio-samplerate={sampleRate} in mpv");
                     }
                 } catch (Exception e) when (e is IOException || e is EndOfStreamException || !pipe.IsConnected) {
                     // mpv closed the pipe (stop, track change)
@@ -650,9 +664,10 @@ static class Program {
                 reopen = false;
                 using var output = new SpatialOutput(deviceId);
                 OpenDevice = output.DeviceId;
+                lastFailure = null;
                 Log($"Spatial endpoint {output.DeviceId}: {output.MaxDynamicObjects} dynamic objects, {output.SampleRate} Hz");
                 if (output.SampleRate != sampleRate) {
-                    Console.WriteLine($"Warning: spatial engine runs at {output.SampleRate} Hz, bridge assumes {sampleRate} Hz");
+                    Log($"Warning: spatial engine runs at {output.SampleRate} Hz, bridge assumes {sampleRate} Hz");
                 }
                 lock (pipeLock) { // the pipe exists before mpv hears it may come: its reselect opens the AO at once
                     outputReady = true;
@@ -674,7 +689,10 @@ static class Program {
                     continue; // keep the queue, mpv plays on
                 }
             } catch (Exception e) {
-                Log($"Spatial output unavailable: {e.Message}");
+                if (e.Message != lastFailure) { // retried every 3 s: once per change, not 1200 lines an hour
+                    Log($"Spatial output unavailable: {e.Message}");
+                    lastFailure = e.Message;
+                }
             }
             OpenDevice = null;
             playing = false;
@@ -701,6 +719,8 @@ static class Program {
             }
         }
     }
+
+    static string lastFailure; // last "Spatial output unavailable" reason logged
 
     [DllImport("avrt.dll", CharSet = CharSet.Unicode)]
     static extern IntPtr AvSetMmThreadCharacteristics(string task, ref int index);
@@ -743,7 +763,7 @@ static class Program {
             output.BufferEvent.WaitOne(100);
             int hr = stream.BeginUpdatingAudioObjects(out _, out uint frames);
             if (hr < 0) {
-                Console.WriteLine($"Spatial stream lost: 0x{hr:X8}"); // device unplugged, spatial sound off, exclusive app
+                Log($"Spatial stream lost: 0x{hr:X8}"); // device unplugged, spatial sound off, exclusive app
                 return;
             }
 
