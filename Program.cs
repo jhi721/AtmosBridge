@@ -720,6 +720,11 @@ static class Program {
         }
     }
 
+    /// <summary>
+    /// Endpoint whose silent stream was reopened once already (null after a stream was heard).
+    /// </summary>
+    static string silentReopened;
+
     static string lastFailure; // last "Spatial output unavailable" reason logged
 
     [DllImport("avrt.dll", CharSet = CharSet.Unicode)]
@@ -742,6 +747,8 @@ static class Program {
         int handledFlush = flushRequests;
         long periods = 0, underruns = 0;
         float maxHeight = 0; // highest audible object since the last status line
+        bool verified = false; // the endpoint meter has shown this stream's sound
+        int audiblePeriods = 0; // periods with audible input before that
         (string Name, bool Objects, int Active, int Inputs, int Lfe) shown = default; // stream and layout in the last Report
 
         // Slot of each input channel/object: LFE -> 0, others -> 1, 2, ... (-1 when out of objects)
@@ -826,13 +833,16 @@ static class Program {
             // float overs go to the Windows mix, which limits them at the endpoint
             float gain = passthrough ? MpvIpc.Gain : 1, boost = Math.Max(gain, 1);
             int written = 0;
+            bool audible = false;
             while (consume && written < frames && current != null) {
                 int n = Math.Min((int)frames - written, current.Length - currentPos);
                 for (int i = 0; i < current.Samples.Length; i++) {
                     int slot = Slot(current, i);
                     if (slot >= 0) {
                         var dst = new Span<float>((float*)buffers[slot] + written, n);
-                        current.Samples[i].AsSpan(currentPos, n).CopyTo(dst);
+                        Span<float> src = current.Samples[i].AsSpan(currentPos, n);
+                        src.CopyTo(dst);
+                        audible |= !verified && gain > 0 && src.ContainsAnyExceptInRange(-1e-4f, 1e-4f);
                         if (boost > 1) {
                             for (int s = 0; s < n; s++) {
                                 dst[s] *= boost;
@@ -871,6 +881,26 @@ static class Program {
             }
             stream.EndUpdatingAudioObjects();
 
+            // A stream Windows takes but renders nothing of (seen after the default device switched from speakers to
+            // spatial headphones, until a bridge restart): ~2 s of audible input with the endpoint meter at 0 reopens it,
+            // once per endpoint in case some endpoint's meter misses spatial streams. The meter is before endpoint
+            // volume and mute, so a muted system doesn't trigger it.
+            if (audible && ++audiblePeriods % 50 == 0) {
+                if (output.Peak != 0) {
+                    verified = true;
+                    silentReopened = null;
+                } else if (audiblePeriods >= 200) {
+                    verified = true;
+                    if (silentReopened != output.DeviceId) {
+                        Log("Spatial stream silent (endpoint peak 0 while the bridge writes sound): reopening it");
+                        silentReopened = output.DeviceId;
+                        reopen = true;
+                        return;
+                    }
+                    Log("Spatial stream still silent after reopening it");
+                }
+            }
+
             // Tell mpv what actually plays (inputs that got a slot), only while it is on the pipe: the tail queued after
             // it left would reach the next mpv as a stale report. Objects only where the stream has them; channels at
             // speaker positions (they go out as dynamic objects too) as their layout, e.g. "7.1.4 (12 channels)".
@@ -901,7 +931,7 @@ static class Program {
             if (++periods % 500 == 0 && current != null) { // every ~5 s
                 Log($"underruns={underruns} buffer={Interlocked.Read(ref buffered) * 1000 / sampleRate} ms " +
                     $"drift={(ratio - 1) * 1e6:+0;-0;0} ppm paused={MpvIpc.Paused} objects={slots.Count - 1} " +
-                    $"maxHeight={maxHeight:0.00}");
+                    $"maxHeight={maxHeight:0.00} peak={output.Peak:0.000}");
                 maxHeight = 0;
             }
         }

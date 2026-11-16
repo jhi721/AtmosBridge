@@ -84,6 +84,11 @@ interface ISpatialAudioObject {
     [PreserveSig] int SetVolume(float volume);
 }
 
+[ComImport, Guid("C02216F6-8C67-4B5B-9D00-D008E73E0064"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IAudioMeterInformation {
+    [PreserveSig] int GetPeakValue(out float peak);
+}
+
 static class AudioObjectType {
     public const uint Dynamic = 1;
     public const uint LowFrequency = 0x10;
@@ -103,6 +108,13 @@ sealed class SpatialOutput : IDisposable {
     public AutoResetEvent BufferEvent { get; } = new(false);
 
     readonly IntPtr activationParams, propVariant;
+    readonly IAudioMeterInformation meter;
+
+    /// <summary>
+    /// Peak of what the endpoint plays, before its volume and mute (-1: no meter). 0 while we write sound = Windows
+    /// renders nothing of this stream.
+    /// </summary>
+    public float Peak => meter != null && meter.GetPeakValue(out float p) >= 0 ? p : -1;
 
     public SpatialOutput(string deviceId) {
         const string spatialOff = "Spatial sound is off (0 dynamic objects). Enable Dolby Atmos for Headphones on the output device.";
@@ -119,6 +131,8 @@ sealed class SpatialOutput : IDisposable {
         }
         DeviceId = deviceId;
         MaxDynamicObjects = maxDynamic;
+        Guid iidMeter = typeof(IAudioMeterInformation).GUID;
+        meter = device.Activate(ref iidMeter, 1, IntPtr.Zero, out object m) >= 0 ? (IAudioMeterInformation)m : null;
 
         Check(client.GetSupportedAudioObjectFormatEnumerator(out IAudioFormatEnumerator formats), "format enumerator");
         Check(formats.GetFormat(0, out IntPtr format), "GetFormat"); // first = preferred (float32 mono)
