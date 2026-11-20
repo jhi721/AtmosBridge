@@ -727,6 +727,10 @@ static class Program {
 
     const float Silence = 1e-4f; // sample magnitude below which a buffer counts as silent
 
+    // Endpoint meter peak below which a stream counts as unheard (-120 dBFS): one Windows renders nothing of reads 0
+    // or float residue (4e-17 seen), not exactly 0 every time; a heard one reads about what the bridge writes
+    const float Unheard = 1e-6f;
+
     static string lastFailure; // last "Spatial output unavailable" reason logged
 
     [DllImport("avrt.dll", CharSet = CharSet.Unicode)]
@@ -888,7 +892,8 @@ static class Program {
             // once per endpoint in case some endpoint's meter misses spatial streams. The meter is before endpoint
             // volume and mute, so a muted system doesn't trigger it.
             if (audible && ++audiblePeriods % 50 == 0) {
-                bool heard = output.Peak != 0;
+                float peak = output.Peak;
+                bool heard = peak >= Unheard || peak < 0; // < 0: no meter, can't judge
                 if (heard || audiblePeriods >= 200) {
                     audiblePeriods = -1; // judged: stop checking this stream
                     if (heard) {
@@ -934,7 +939,7 @@ static class Program {
             if (++periods % 500 == 0 && current != null) { // every ~5 s
                 Log($"underruns={underruns} buffer={Interlocked.Read(ref buffered) * 1000 / sampleRate} ms " +
                     $"drift={(ratio - 1) * 1e6:+0;-0;0} ppm paused={MpvIpc.Paused} objects={slots.Count - 1} " +
-                    $"maxHeight={maxHeight:0.00} peak={output.Peak:0.000}");
+                    $"maxHeight={maxHeight:0.00} peak={output.Peak:0.000000}");
                 maxHeight = 0;
             }
         }
