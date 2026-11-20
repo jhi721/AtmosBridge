@@ -116,6 +116,10 @@ the ceiling. PCM arrives already scaled by mpv.
   the bridge has a spatial output it opens the pipe, sets `user-data/atmosbridge-ready=yes` (the script restores
   `audio-spdif`) and, seeing mpv elsewhere over IPC, sends `ao-reload` so mpv lands on the pipe again. mpv still on a
   dead pipe (bridge restarted while spatial sound is off) gets an `ao-reload` too, to WASAPI.
+- Spatial stream Windows takes but renders nothing of (endpoint meter at 0 for ~2 s while the bridge writes sound;
+  seen after the default device switched from speakers to spatial headphones): the bridge reopens it, and if it is
+  still silent restarts itself (once per endpoint until a stream there is heard). mpv plays through WASAPI in between,
+  as on exit, and the new bridge brings it back to the pipe as above.
 - Bridge not running at all: `ao=pcm,wasapi` plays through WASAPI, decoded by mpv (the script waits up to 0.3 s per
   file for the bridge's flag, then empties `audio-spdif`). A bridge that was killed
   (crash, Task Manager) leaves `ready=yes` behind: that mpv stays silent on its dead pipe, and on passthrough tracks of

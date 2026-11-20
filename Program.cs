@@ -50,6 +50,7 @@ static class Program {
     static void Log(string message) => Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} +{clock.Elapsed.TotalSeconds:0.00}] {message}");
 
     static int Main(string[] args) {
+        bool restarted = AwaitPredecessor();
         string pipeName = "atmos", ipcName = "mpv-atmos", deviceId = null, file = null;
         for (int i = 0; i < args.Length - 1; i++) {
             switch (args[i]) {
@@ -61,11 +62,15 @@ static class Program {
                 case "--log": // windowless runs (login startup) have no console
                     string logPath = Path.GetFullPath(args[++i]);
                     Directory.CreateDirectory(Path.GetDirectoryName(logPath));
-                    try { // keep the last run's log: restarting the bridge is how a user gets out of a problem
-                        File.Move(logPath, Path.ChangeExtension(logPath, ".prev" + Path.GetExtension(logPath)), true);
-                    } catch (IOException) {
+                    // Keep the last run's log: restarting the bridge is how a user gets out of a problem. A self-restart
+                    // continues its predecessor's log instead, so the run before it stays in .prev.
+                    if (!restarted) {
+                        try {
+                            File.Move(logPath, Path.ChangeExtension(logPath, ".prev" + Path.GetExtension(logPath)), true);
+                        } catch (IOException) {
+                        }
                     }
-                    var logWriter = new StreamWriter(logPath, false) { AutoFlush = true };
+                    var logWriter = new StreamWriter(logPath, restarted) { AutoFlush = true };
                     Console.SetOut(logWriter);
                     Console.SetError(logWriter); // both wrap it in one synchronized writer: lines don't interleave
                     break;
@@ -298,6 +303,15 @@ static class Program {
             Log(why);
             MpvIpc.Command("ao-reload");
         }
+    }
+
+    /// <summary>
+    /// End the process (tray Exit, restart): mpv gets playback back first. Helpers end with their stdin.
+    /// </summary>
+    internal static void Quit(string why) {
+        Tray.Hide();
+        HandBack(why);
+        Environment.Exit(0);
     }
 
     /// <summary>
@@ -725,6 +739,53 @@ static class Program {
     /// </summary>
     static string silentReopened;
 
+    /// <summary>
+    /// Endpoint whose silent stream made the previous bridge restart into this one (null after a stream was heard):
+    /// once per endpoint, so a stream no restart fixes doesn't restart the bridge forever.
+    /// </summary>
+    static string restartedFor = Environment.GetEnvironmentVariable(RestartedVar);
+
+    const string ParentVar = "ATMOSBRIDGE_PARENT", RestartedVar = "ATMOSBRIDGE_RESTARTED_FOR";
+
+    /// <summary>
+    /// Started by a bridge restarting itself (true): wait for it to end, the log file, the pipe and the tray icon are
+    /// its own until then. It exits right after starting us; one still there after 5 s is stuck and gets killed.
+    /// </summary>
+    static bool AwaitPredecessor() {
+        if (!int.TryParse(Environment.GetEnvironmentVariable(ParentVar), out int parent)) {
+            return false;
+        }
+        try {
+            using var predecessor = System.Diagnostics.Process.GetProcessById(parent);
+            if (!predecessor.WaitForExit(5000)) {
+                predecessor.Kill();
+                predecessor.WaitForExit(5000);
+            }
+        } catch (Exception e) when (e is ArgumentException || e is InvalidOperationException) { // gone already
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Replace this process with a new bridge (same arguments): what a silent stream needs when reopening it in the
+    /// same process doesn't help. mpv plays through WASAPI in between and the new bridge's AO check brings it back.
+    /// </summary>
+    static void Restart(string endpoint) {
+        var start = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath) { UseShellExecute = false };
+        foreach (string arg in Environment.GetCommandLineArgs()[1..]) {
+            start.ArgumentList.Add(arg);
+        }
+        start.Environment[ParentVar] = Environment.ProcessId.ToString();
+        start.Environment[RestartedVar] = endpoint;
+        try {
+            System.Diagnostics.Process.Start(start)?.Dispose(); // it waits for this process to end
+        } catch (Exception e) {
+            Log($"Can't restart the bridge: {e.Message}");
+            return;
+        }
+        Quit("Restarting: handing playback back to mpv");
+    }
+
     const float Silence = 1e-4f; // sample magnitude below which a buffer counts as silent
 
     // Endpoint meter peak below which a stream counts as unheard (-120 dBFS): one Windows renders nothing of reads 0
@@ -888,23 +949,26 @@ static class Program {
             stream.EndUpdatingAudioObjects();
 
             // A stream Windows takes but renders nothing of (seen after the default device switched from speakers to
-            // spatial headphones, until a bridge restart): ~2 s of audible input with the endpoint meter at 0 reopens it,
-            // once per endpoint in case some endpoint's meter misses spatial streams. The meter is before endpoint
-            // volume and mute, so a muted system doesn't trigger it.
+            // spatial headphones, until a bridge restart): ~2 s of audible input with the endpoint meter at 0 reopens it;
+            // still silent, the bridge restarts. Once each per endpoint in case some endpoint's meter misses spatial
+            // streams. The meter is before endpoint volume and mute, so a muted system doesn't trigger it.
             if (audible && ++audiblePeriods % 50 == 0) {
                 float peak = output.Peak;
                 bool heard = peak >= Unheard || peak < 0; // < 0: no meter, can't judge
                 if (heard || audiblePeriods >= 200) {
                     audiblePeriods = -1; // judged: stop checking this stream
                     if (heard) {
-                        silentReopened = null;
+                        silentReopened = restartedFor = null;
                     } else if (silentReopened != output.DeviceId) {
                         Log("Spatial stream silent (endpoint peak 0 while the bridge writes sound): reopening it");
                         silentReopened = output.DeviceId;
                         reopen = true;
                         return;
+                    } else if (restartedFor != output.DeviceId) {
+                        Log("Spatial stream still silent after reopening it: restarting the bridge");
+                        Restart(output.DeviceId);
                     } else {
-                        Log("Spatial stream still silent after reopening it");
+                        Log("Spatial stream still silent after restarting the bridge");
                     }
                 }
             }
