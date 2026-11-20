@@ -107,7 +107,28 @@ sealed class SpatialOutput : IDisposable {
     public string DeviceId { get; }
     public AutoResetEvent BufferEvent { get; } = new(false);
 
+    /// <summary>
+    /// Objects activated on Stream, in activation order; released with it.
+    /// </summary>
+    public IReadOnlyList<ISpatialAudioObject> Objects => objects;
+
+    readonly List<ISpatialAudioObject> objects = [];
+
+    /// <summary>
+    /// Activate one more object (AudioObjectType) and append it to Objects; the HRESULT (fails when out of objects).
+    /// </summary>
+    public int Activate(uint type) {
+        int hr = Stream.ActivateSpatialAudioObject(type, out ISpatialAudioObject obj);
+        if (hr >= 0) {
+            objects.Add(obj);
+        }
+        return hr;
+    }
+
     readonly IntPtr activationParams, propVariant;
+    readonly IMMDevice device;
+    readonly ISpatialAudioClient client;
+    readonly IAudioFormatEnumerator formats; // owns the format the stream was activated with
     readonly IAudioMeterInformation meter;
 
     /// <summary>
@@ -124,39 +145,46 @@ sealed class SpatialOutput : IDisposable {
             deviceId = "{0.0.0.00000000}." + deviceId;
         }
         var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
-        Check(enumerator.GetDevice(deviceId, out IMMDevice device), "GetDevice " + deviceId);
-        (ISpatialAudioClient client, uint maxDynamic) = Spatial(device);
-        if (maxDynamic == 0) {
-            throw new InvalidOperationException(spatialOff);
+        int hr = enumerator.GetDevice(deviceId, out device);
+        Release(enumerator);
+        try {
+            Check(hr, "GetDevice " + deviceId);
+            (client, uint maxDynamic) = Spatial(device);
+            if (maxDynamic == 0) {
+                throw new InvalidOperationException(spatialOff);
+            }
+            DeviceId = deviceId;
+            MaxDynamicObjects = maxDynamic;
+            Guid iidMeter = typeof(IAudioMeterInformation).GUID;
+            meter = device.Activate(ref iidMeter, 1, IntPtr.Zero, out object m) >= 0 ? (IAudioMeterInformation)m : null;
+
+            Check(client.GetSupportedAudioObjectFormatEnumerator(out formats), "format enumerator");
+            Check(formats.GetFormat(0, out IntPtr format), "GetFormat"); // first = preferred (float32 mono)
+            SampleRate = Marshal.ReadInt32(format, 4);
+
+            // SpatialAudioObjectRenderStreamActivationParams (x64 layout)
+            activationParams = Marshal.AllocHGlobal(40);
+            Marshal.WriteIntPtr(activationParams, 0, format);
+            Marshal.WriteInt32(activationParams, 8, (int)AudioObjectType.LowFrequency);
+            Marshal.WriteInt32(activationParams, 12, 0);
+            Marshal.WriteInt32(activationParams, 16, (int)maxDynamic);
+            Marshal.WriteInt32(activationParams, 20, 6); // AudioCategory_Media
+            Marshal.WriteIntPtr(activationParams, 24, BufferEvent.SafeWaitHandle.DangerousGetHandle());
+            Marshal.WriteIntPtr(activationParams, 32, IntPtr.Zero);
+
+            // PROPVARIANT { VT_BLOB, cbSize, pBlobData }
+            propVariant = Marshal.AllocHGlobal(24);
+            Marshal.WriteInt64(propVariant, 0, 65); // vt + reserved words
+            Marshal.WriteInt64(propVariant, 8, 40); // cbSize + padding
+            Marshal.WriteIntPtr(propVariant, 16, activationParams);
+
+            Guid iidStream = typeof(ISpatialAudioObjectRenderStream).GUID;
+            Check(client.ActivateSpatialAudioStream(propVariant, ref iidStream, out object s), "ActivateSpatialAudioStream");
+            Stream = (ISpatialAudioObjectRenderStream)s;
+        } catch {
+            Dispose(); // retried every 3 s while spatial sound is off: release now, not when the GC runs
+            throw;
         }
-        DeviceId = deviceId;
-        MaxDynamicObjects = maxDynamic;
-        Guid iidMeter = typeof(IAudioMeterInformation).GUID;
-        meter = device.Activate(ref iidMeter, 1, IntPtr.Zero, out object m) >= 0 ? (IAudioMeterInformation)m : null;
-
-        Check(client.GetSupportedAudioObjectFormatEnumerator(out IAudioFormatEnumerator formats), "format enumerator");
-        Check(formats.GetFormat(0, out IntPtr format), "GetFormat"); // first = preferred (float32 mono)
-        SampleRate = Marshal.ReadInt32(format, 4);
-
-        // SpatialAudioObjectRenderStreamActivationParams (x64 layout)
-        activationParams = Marshal.AllocHGlobal(40);
-        Marshal.WriteIntPtr(activationParams, 0, format);
-        Marshal.WriteInt32(activationParams, 8, (int)AudioObjectType.LowFrequency);
-        Marshal.WriteInt32(activationParams, 12, 0);
-        Marshal.WriteInt32(activationParams, 16, (int)maxDynamic);
-        Marshal.WriteInt32(activationParams, 20, 6); // AudioCategory_Media
-        Marshal.WriteIntPtr(activationParams, 24, BufferEvent.SafeWaitHandle.DangerousGetHandle());
-        Marshal.WriteIntPtr(activationParams, 32, IntPtr.Zero);
-
-        // PROPVARIANT { VT_BLOB, cbSize, pBlobData }
-        propVariant = Marshal.AllocHGlobal(24);
-        Marshal.WriteInt64(propVariant, 0, 65); // vt + reserved words
-        Marshal.WriteInt64(propVariant, 8, 40); // cbSize + padding
-        Marshal.WriteIntPtr(propVariant, 16, activationParams);
-
-        Guid iidStream = typeof(ISpatialAudioObjectRenderStream).GUID;
-        Check(client.ActivateSpatialAudioStream(propVariant, ref iidStream, out object s), "ActivateSpatialAudioStream");
-        Stream = (ISpatialAudioObjectRenderStream)s;
     }
 
     /// <summary>
@@ -164,35 +192,38 @@ sealed class SpatialOutput : IDisposable {
     /// itself). Never another endpoint: it would take the sound away from the speakers the user picked in Windows.
     /// </summary>
     public static string AutoDevice() {
+        // Polled every 3 s: everything released here, not left to the GC
         var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
-        if (enumerator.GetDefaultAudioEndpoint(0 /* eRender */, 1 /* eMultimedia */, out IMMDevice device) >= 0 && Spatial(device).MaxDynamic > 0) {
-            device.GetId(out string id);
-            return id;
+        string id = null;
+        if (enumerator.GetDefaultAudioEndpoint(0 /* eRender */, 1 /* eMultimedia */, out IMMDevice device) >= 0) {
+            if (HasSpatial(device)) {
+                device.GetId(out id);
+            }
+            Release(device);
         }
-        return null;
+        Release(enumerator);
+        return id;
     }
 
     /// <summary>
     /// Active render endpoints for the tray menu, with whether spatial sound is on there.
     /// </summary>
-    public static List<(string Id, string Name, bool Spatial)> Devices() =>
-        [.. ActiveEndpoints().Select(e => (e.Id, FriendlyName(e.Device) ?? e.Id, Spatial(e.Device).MaxDynamic > 0))];
-
-    /// <summary>
-    /// Active render endpoints with their ids.
-    /// </summary>
-    static IEnumerable<(IMMDevice Device, string Id)> ActiveEndpoints() {
+    public static List<(string Id, string Name, bool Spatial)> Devices() {
+        var devices = new List<(string, string, bool)>();
         var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
-        if (enumerator.EnumAudioEndpoints(0 /* eRender */, 1 /* DEVICE_STATE_ACTIVE */, out IMMDeviceCollection all) < 0) {
-            yield break;
-        }
-        all.GetCount(out uint count);
-        for (uint i = 0; i < count; i++) {
-            if (all.Item(i, out IMMDevice device) >= 0) {
-                device.GetId(out string id);
-                yield return (device, id);
+        if (enumerator.EnumAudioEndpoints(0 /* eRender */, 1 /* DEVICE_STATE_ACTIVE */, out IMMDeviceCollection all) >= 0) {
+            all.GetCount(out uint count);
+            for (uint i = 0; i < count; i++) {
+                if (all.Item(i, out IMMDevice device) >= 0) {
+                    device.GetId(out string id);
+                    devices.Add((id, FriendlyName(device) ?? id, HasSpatial(device)));
+                    Release(device);
+                }
             }
+            Release(all);
         }
+        Release(enumerator);
+        return devices;
     }
 
     [DllImport("ole32.dll")]
@@ -200,11 +231,15 @@ sealed class SpatialOutput : IDisposable {
 
     static string FriendlyName(IMMDevice device) {
         var key = new PropertyKey { FormatId = new("A45C254E-DF1C-4EFD-8020-67D146A850E0"), PropertyId = 14 }; // PKEY_Device_FriendlyName
-        if (device.OpenPropertyStore(0 /* STGM_READ */, out IPropertyStore store) < 0 || store.GetValue(ref key, out PropVariant value) < 0) {
+        if (device.OpenPropertyStore(0 /* STGM_READ */, out IPropertyStore store) < 0) {
             return null;
         }
-        string name = value.Type == 31 /* VT_LPWSTR */ ? Marshal.PtrToStringUni(value.Pointer) : null;
-        PropVariantClear(ref value);
+        string name = null;
+        if (store.GetValue(ref key, out PropVariant value) >= 0) {
+            name = value.Type == 31 /* VT_LPWSTR */ ? Marshal.PtrToStringUni(value.Pointer) : null;
+            PropVariantClear(ref value);
+        }
+        Release(store);
         return name;
     }
 
@@ -220,6 +255,26 @@ sealed class SpatialOutput : IDisposable {
         return client.GetMaxDynamicObjectCount(out uint count) < 0 ? (client, 0) : (client, count);
     }
 
+    /// <summary>
+    /// Spatial sound is on at the endpoint.
+    /// </summary>
+    static bool HasSpatial(IMMDevice device) {
+        (ISpatialAudioClient client, uint maxDynamic) = Spatial(device);
+        Release(client);
+        return maxDynamic > 0;
+    }
+
+    /// <summary>
+    /// Drop our reference to a COM object now instead of whenever the GC runs: the audio engine keeps what we hold
+    /// alive. A stopped stream left to the GC, e.g., stays registered next to the one reopened on the same endpoint
+    /// (suspected cause of streams Windows renders nothing of).
+    /// </summary>
+    static void Release(object comObject) {
+        if (comObject != null) {
+            Marshal.ReleaseComObject(comObject);
+        }
+    }
+
     public static void Check(int hr, string what) {
         if (hr < 0) {
             throw new COMException($"{what} failed: 0x{hr:X8}", hr);
@@ -227,8 +282,21 @@ sealed class SpatialOutput : IDisposable {
     }
 
     public void Dispose() {
-        Stream.Stop();
-        Marshal.FreeHGlobal(propVariant);
+        if (Stream != null) {
+            Stream.Stop();
+            Stream.Reset();
+        }
+        foreach (ISpatialAudioObject obj in objects) {
+            Release(obj);
+        }
+        // The stream before what it was activated with: format, params, event
+        Release(Stream);
+        Release(formats);
+        Release(meter);
+        Release(client);
+        Release(device);
+        Marshal.FreeHGlobal(propVariant); // no-op on IntPtr.Zero (a failed open)
         Marshal.FreeHGlobal(activationParams);
+        BufferEvent.Dispose();
     }
 }

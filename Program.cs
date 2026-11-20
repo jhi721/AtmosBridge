@@ -741,7 +741,7 @@ static class Program {
         AvSetMmThreadCharacteristics("Pro Audio", ref taskIndex);
         ISpatialAudioObjectRenderStream stream = output.Stream;
         // Slot 0 is the static LFE object, the rest are dynamic objects; inputs map onto them by role
-        var slots = new List<ISpatialAudioObject>();
+        IReadOnlyList<ISpatialAudioObject> slots = output.Objects; // activated and released by the output
         var buffers = new List<IntPtr>();
         Chunk current = null;
         int currentPos = 0;
@@ -815,12 +815,11 @@ static class Program {
                 currentPos = 0;
             }
             if (slots.Count == 0) {
-                SpatialOutput.Check(stream.ActivateSpatialAudioObject(AudioObjectType.LowFrequency, out ISpatialAudioObject lfe), "LFE object");
-                slots.Add(lfe);
+                SpatialOutput.Check(output.Activate(AudioObjectType.LowFrequency), "LFE object");
             }
             int needed = current == null ? 0 : 1 + current.Lfe.Count(x => !x);
-            while (slots.Count < needed && stream.ActivateSpatialAudioObject(AudioObjectType.Dynamic, out ISpatialAudioObject obj) >= 0) {
-                slots.Add(obj); // stops early when out of objects: the rest stays silent
+            // Stops early when out of objects: the rest stays silent
+            while (slots.Count < needed && output.Activate(AudioObjectType.Dynamic) >= 0) {
             }
 
             buffers.Clear();
