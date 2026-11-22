@@ -36,6 +36,11 @@ static class Program {
     static int targetSamples = sampleRate / 10;
 
     /// <summary>
+    /// After a cache stall, time for mpv's AO refill (audio-buffer, 0.2 s by default) to pass the decoders before it is judged.
+    /// </summary>
+    const int StallSettleMs = 200;
+
+    /// <summary>
     /// Samples decoded but not yet handed to the spatial engine.
     /// </summary>
     static long buffered;
@@ -811,6 +816,7 @@ static class Program {
         Chunk current = null;
         int currentPos = 0;
         bool prebuffering = true, wasPaused = false;
+        long stallJudgeAt = 0; // clock ms to judge a cache stall's refill at, 0 = none
         int handledFlush = flushRequests;
         long periods = 0, underruns = 0;
         float maxHeight = 0; // highest audible object since the last status line
@@ -849,16 +855,26 @@ static class Program {
                 }
                 Interlocked.Add(ref buffered, -dropped);
                 prebuffering = true;
+                stallJudgeAt = 0;
             }
             if (prebuffering && Interlocked.Read(ref buffered) >= targetSamples) {
                 prebuffering = false;
             }
             bool paused = MpvIpc.Paused;
-            // Resumed: mpv counts what it wrote as played, so audio written while paused beyond the cushion (its AO
-            // refill after a seek or reopen) would play that much late
-            if (wasPaused && !paused && Interlocked.Read(ref buffered) > targetSamples * 3 / 2) {
-                Log($"Resumed with {Interlocked.Read(ref buffered) * 1000 / sampleRate} ms queued: trimming to the cushion");
-                while (Interlocked.Read(ref buffered) > targetSamples * 3 / 2) {
+            long now = clock.ElapsedMilliseconds, queued = Interlocked.Read(ref buffered), cushionMax = targetSamples * 3 / 2;
+            // mpv counts what it wrote as played, so its AO refill beyond the cushion would play that much late (after a
+            // cache stall the drift controller would even keep it as back-pressure: VO drops frames until a seek). Judged
+            // on resume, and once per cache stall after its refill has settled (IPC and pipe come in either order).
+            if (MpvIpc.PausedForCache) {
+                stallJudgeAt = now + StallSettleMs;
+            }
+            bool resumed = wasPaused && !paused, stallEnded = stallJudgeAt != 0 && now >= stallJudgeAt;
+            if (stallEnded || !sessionActive) {
+                stallJudgeAt = 0;
+            }
+            if ((resumed || stallEnded) && !paused && queued > cushionMax) {
+                Log($"{(resumed ? "Resumed" : "Cache stall ended")} with {queued * 1000 / sampleRate} ms queued: trimming to the cushion");
+                while (Interlocked.Read(ref buffered) > cushionMax) {
                     int n;
                     if (current != null) {
                         n = current.Length - currentPos;

@@ -11,6 +11,11 @@ static class MpvIpc {
     public static volatile bool Paused;
 
     /// <summary>
+    /// mpv waits for its cache to refill (paused-for-cache): audio stops like a pause, but pause stays false.
+    /// </summary>
+    public static volatile bool PausedForCache;
+
+    /// <summary>
     /// mpv's audio output driver ("pcm" = the bridge's pipe, "wasapi", ...), null while unknown.
     /// </summary>
     public static volatile string CurrentAo;
@@ -69,6 +74,7 @@ static class MpvIpc {
                     writer.WriteLine("""{ "command": ["observe_property", 3, "volume"] }""");
                     writer.WriteLine("""{ "command": ["observe_property", 4, "mute"] }""");
                     writer.WriteLine("""{ "command": ["observe_property", 5, "ao"] }""");
+                    writer.WriteLine("""{ "command": ["observe_property", 6, "paused-for-cache"] }""");
                     writer.WriteLine(ReadyJson());
                     if (queued is (string json, long at) && Environment.TickCount64 - at < 5000) {
                         writer.WriteLine(json);
@@ -96,6 +102,9 @@ static class MpvIpc {
                                 case "pause":
                                     Paused = d.ValueKind == JsonValueKind.True;
                                     break;
+                                case "paused-for-cache":
+                                    PausedForCache = d.ValueKind == JsonValueKind.True;
+                                    break;
                                 case "current-ao":
                                     CurrentAo = d.ValueKind == JsonValueKind.String ? d.GetString() : null;
                                     AoChanged?.Invoke();
@@ -122,7 +131,7 @@ static class MpvIpc {
             if (connected) {
                 log("mpv IPC disconnected");
             }
-            Paused = false;
+            Paused = PausedForCache = false;
             CurrentAo = null;
             PcmFirst = false;
             volume = 1;

@@ -57,7 +57,9 @@ display-resample for spdif. It also turns `audio-stream-silence` off when `ao` s
 silence into the untimed AO as fast as it takes it while paused, and the bridge would play it after resume.
 
 Over mpv's JSON IPC (`input-ipc-server`) the bridge freezes the output on pause and flushes it on
-seek, then prebuffers again. Without IPC it still plays, but pause/seek leave ~0.1 s of stale audio.
+seek, then prebuffers again. mpv counts what it wrote as played, so on resume and once a cache stall
+(`paused-for-cache`) ends, whatever mpv's AO refill queued beyond 1.5× latency is dropped. Without IPC it still plays,
+but pause/seek leave ~0.1 s of stale audio.
 
 End to end (bridge cushion + Windows spatial engine + Dolby renderer) the sound leaves ~0.26 s after mpv writes
 it (`--latency` + ~0.16 s). The installer sets no `audio-delay`; `audio-delay=-0.26` in mpv.conf (adjust it together
